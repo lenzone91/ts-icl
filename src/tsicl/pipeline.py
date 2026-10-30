@@ -414,6 +414,7 @@ class TSICL:
                 covar_t, _ = self.forecast(
                     inputs            = rearrange(covariates_c, 'b c t 1 -> b t c'),
                     prediction_length = horizon_len,
+                    context_length    = self.this_context_length,
                     batch_size        = len(covariates_c),
                     device            = self._device,
                     denormalize       = True,
@@ -422,6 +423,24 @@ class TSICL:
                 )
                 assert isinstance(covar_t, torch.Tensor)
                 covar_t = covar_t.to(series_c.device)
+            elif covar_on_future and allow_covar_forecast:
+                # In a mixed set, forecast only channels with no observed future.
+                # Supplied future values (including partial ones) stay untouched.
+                past_only = covar_t.isnan().all(dim=-2).squeeze(-1)
+                if past_only.any():
+                    forecast_inputs = covariates_c.squeeze(-1)[past_only]
+                    predicted, _ = self.forecast(
+                        inputs=forecast_inputs,
+                        prediction_length=horizon_len,
+                        context_length=self.this_context_length,
+                        batch_size=len(forecast_inputs),
+                        device=self._device,
+                        denormalize=True,
+                        point_estimator='median',
+                        squeeze_output=False,
+                    )
+                    covar_t = covar_t.clone()
+                    covar_t[past_only] = predicted.squeeze(1).to(series_c.device)
         else:
             covariates_c, covar_t = None, None
 
@@ -680,6 +699,8 @@ class TSICL:
                 The keys of the dict must be names of the
                 covariates and values must be 1-d `torch.Tensor` or `np.ndarray` with length equal to the `prediction_length`.
                 All keys in `future_covariates` must be a subset of the keys in `past_covariates`.
+                Historical channels absent from `future_covariates` are retained;
+                their future is left missing unless `allow_covar_forecast=True`.
 
         covars (optional)
             The optional covariates available to help forecasting `inputs`.
@@ -1375,6 +1396,15 @@ class TSICL:
         if (covar_c is not None) and (covar_t is not None):
             scaler_cov = CustomStandardScaler(dim=-2,epsilon=1e-7)
             scaler_cov.fit(covar_t) # type: ignore
+            if setting == 'forecasting':
+                # A mixed dictionary can contain channels with an entirely
+                # unknown horizon. Use their history instead of all-NaN stats.
+                past_only = covar_t.isnan().all(dim=-2, keepdim=True)
+                if past_only.any():
+                    scaler_past = CustomStandardScaler(dim=-2, epsilon=1e-7)
+                    scaler_past.fit(covar_c)
+                    scaler_cov.mean = torch.where(past_only, scaler_past.mean, scaler_cov.mean)
+                    scaler_cov.std = torch.where(past_only, scaler_past.std, scaler_cov.std)
             covar_t      = scaler_cov.transform(covar_t)         # (bs, C, query_seq_len, 1)
             covar_c      = scaler_cov.transform(covar_c)         # (bs, C, max_context_len, 1)
             series_covar = torch.cat([covar_c, covar_t], dim=-2) # (bs, C, max_context_len + query_seq_len, 1)
