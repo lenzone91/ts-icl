@@ -551,68 +551,33 @@ class PerceiverEncoder(nn.Module):
         coords: torch.Tensor,
         series_covar: torch.Tensor,
         coords_covar: torch.Tensor,
-        mask: torch.Tensor | None = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size, target_length, _ = series.shape
+        covariate_length = series_covar.shape[2]
+        sequence_length = max(target_length, covariate_length)
+        target_padding = sequence_length - target_length
+        covariate_padding = sequence_length - covariate_length
 
-        b = series.shape[0]
-        missing_len = series_covar.shape[2] - series.shape[1]
+        target_mask = torch.ones(
+            (batch_size, 1, target_length), dtype=torch.bool, device=series.device
+        )
+        covariate_mask = ~series_covar.squeeze(-1).isnan()
+        series_covar = torch.nan_to_num(series_covar, nan=0.0)
 
-        # handle nans in covar:
-        mask_covar   = series_covar.isnan().sum(0).squeeze(-1) == 0 # (C-1, covar_seq_len)
-        series_covar = torch.nan_to_num(series_covar, nan = 0.0)
+        if target_padding:
+            series = nn.functional.pad(series, (0, 0, 0, target_padding))
+            coords = nn.functional.pad(coords, (0, 0, 0, target_padding))
+            target_mask = nn.functional.pad(target_mask, (0, target_padding))
 
-        if missing_len > 0:
+        elif covariate_padding:
+            series_covar = nn.functional.pad(series_covar, (0, 0, 0, covariate_padding))
+            coords_covar = nn.functional.pad(coords_covar, (0, 0, 0, covariate_padding))
+            covariate_mask = nn.functional.pad(covariate_mask, (0, covariate_padding))
 
-            mask = torch.cat([
-                torch.cat(
-                    [
-                        torch.ones(1, series.shape[1]),
-                        torch.zeros(1, missing_len)
-                    ], dim = 1
-                ).to(series.device),
-                mask_covar
-                # torch.ones(series_covar.shape[1], series_covar.shape[2])
-            ], dim = 0).bool() # (C, seq_len)
-            # XXX merge with existing `mask`?
-
-            series = torch.cat([
-                series,
-                torch.zeros((b, missing_len, 1)).to(series.device)
-            ], dim = 1) # (bs, seq_len, 1)
-
-            coords = torch.cat([
-                coords,
-                torch.zeros((b, missing_len, 1)).to(series.device)
-            ], dim = 1) # (bs, seq_len, 1)
-
-        
-        elif missing_len < 0:
-
-            mask = torch.cat([
-                torch.ones(1, series.shape[1]).to(series.device),
-                torch.cat(
-                    [
-                        mask_covar,
-                        # torch.ones(series_covar.shape[1], series_covar.shape[2]),
-                        torch.zeros(series_covar.shape[1], abs(missing_len)).to(series.device)
-                    ], dim = 1
-                )
-            ], dim = 0).bool().to(series.device) # (C, seq_len)
-            # XXX merge with existing `mask`?
-
-            series_covar = torch.cat([
-                series_covar,
-                torch.zeros((series.shape[0], coords_covar.shape[1], abs(missing_len), 1)).to(series.device)
-            ], dim = 2)
-            
-            coords_covar = torch.cat([
-                coords_covar,
-                torch.zeros((series.shape[0], coords_covar.shape[1], abs(missing_len), 1)).to(series.device)
-            ], dim = 2) # (bs, C-1, seq_len, 1)
+        observed_mask = torch.cat([target_mask, covariate_mask], dim=1)
 
         assert series.shape[1] == series_covar.shape[2] == coords.shape[1] == coords_covar.shape[2]
-
-        return series, coords, series_covar, coords_covar, mask
+        return series, coords, series_covar, coords_covar, observed_mask
 
     def forward(
         self,
@@ -620,7 +585,6 @@ class PerceiverEncoder(nn.Module):
         coords: torch.Tensor,
         series_covar: torch.Tensor | None = None,
         coords_covar: torch.Tensor | None = None,
-        mask: torch.Tensor | None = None,
         target_coords: torch.Tensor | None = None,
         sample_posterior: bool = True,
         return_stats: bool = False,
@@ -630,11 +594,11 @@ class PerceiverEncoder(nn.Module):
         '''
         series is shape (B, T_shared, 1)
         coords is shape (B, T_shared, 1)
-        mask is shape (B, T_shared, 1)
         series_covar is shape (B, C-1, T_shared, 1)
         coords_covar is shape (B, C-1, T_shared, 1)
         '''
 
+        mask = None
         if series_covar is None:
             series_all = series.unsqueeze(1) # (bs, 1, seq_len, 1)
             coords_all = coords.unsqueeze(1) # (bs, 1, seq_len, 1)
@@ -649,15 +613,12 @@ class PerceiverEncoder(nn.Module):
                 coords       = coords,
                 series_covar = series_covar,
                 coords_covar = coords_covar,
-                mask         = mask
             )
 
             series_all = torch.cat([series.unsqueeze(1), series_covar], dim=1) # (bs, C, seq_len, 1)
             coords_all = torch.cat([coords.unsqueeze(1), coords_covar], dim=1) # (bs, C, seq_len, 1)
 
-            if mask is not None:
-                assert mask.ndim == 2
-                mask = repeat(mask, 'c t -> (b c) t', b=series.shape[0])
+            mask = rearrange(mask, 'b c t -> (b c) t')
 
         b, c, t, _ = series_all.shape
 

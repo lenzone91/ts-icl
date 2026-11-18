@@ -117,10 +117,12 @@ class CrossAttention(nn.Module):
         # compute per-head attention scores:
         sim = einsum("b i d, b j d -> b i j", q, k) * self.scale # (bs x n_heads, seq_len, seq_len_kv)
 
+        has_observations = None
         # apply attention mask, if need be:
         if exists(mask):
             mask = mask.bool()
             mask = rearrange(mask, "b ... -> b (...)")
+            has_observations = mask.any(dim=-1).view(-1, 1, 1)
             max_neg_value = -torch.finfo(sim.dtype).max
             mask = repeat(mask, "b j -> (b h) (n) j", h=h, n=x.shape[1])
             sim.masked_fill_(~mask, max_neg_value)
@@ -139,7 +141,11 @@ class CrossAttention(nn.Module):
         else:
             out = rearrange(out, "(b h) n d -> b n (h d)", h=h) # (bs, seq_len, d_model)
 
-        return self.resid_drop(self.to_out(out))    # (bs, seq_len, query_dim)
+        out = self.resid_drop(self.to_out(out))
+        if has_observations is not None:
+            # A fully masked row must contribute nothing, including the output bias.
+            out = out.masked_fill(~has_observations, 0.0)
+        return out
 
 
 class MultiScaleAttention(nn.Module):
