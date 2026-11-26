@@ -303,6 +303,51 @@ class TSICL:
     # TASK UTILS
     # ---------------
 
+    def _forecast_covariate_channels(
+        self,
+        covar_series: torch.Tensor,
+        horizon_len: int,
+        batch_size: int,
+        device: torch.device,
+        covar_quantile_levels: List[float] | None = None,
+    ) -> torch.Tensor:
+        """Forecast 1D historical covariate series safely (all-NaN channels stay NaN).
+
+        When `covar_quantile_levels` is provided, returns all K quantile trajectories
+        of shape `(M, horizon_len, K)`; otherwise returns the median of shape `(M, horizon_len, 1)`.
+        """
+        valid_mask = (~covar_series.isnan()).any(dim=1)
+        out_k = len(covar_quantile_levels) if covar_quantile_levels is not None else 1
+        out = torch.full(
+            (len(covar_series), horizon_len, out_k),
+            float('nan'),
+            device=device,
+            dtype=covar_series.dtype,
+        )
+        if valid_mask.any():
+            valid_inputs = covar_series[valid_mask]
+            q_levels = covar_quantile_levels if covar_quantile_levels is not None else [0.5]
+            point, quantiles = self.forecast(
+                inputs                = valid_inputs,
+                prediction_length     = horizon_len,
+                context_length        = self.this_context_length,
+                batch_size            = min(len(valid_inputs), max(1, batch_size)),
+                quantile_levels       = q_levels,
+                device                = self._device,
+                denormalize           = True,
+                point_estimator       = 'median',
+                allow_covar_forecast  = False,
+                covar_quantile_levels = None,
+                squeeze_output        = False,
+            )
+            if covar_quantile_levels is not None:
+                assert isinstance(quantiles, torch.Tensor)
+                out[valid_mask] = quantiles.squeeze(1).to(device=device, dtype=covar_series.dtype)
+            else:
+                assert isinstance(point, torch.Tensor)
+                out[valid_mask] = point.squeeze(1).to(device=device, dtype=covar_series.dtype)
+        return out
+
     def _get_context_target_coords_f(
         self,
         grid: torch.Tensor,
@@ -311,6 +356,7 @@ class TSICL:
         covariates: torch.Tensor | None = None,
         allow_auto_complete: bool = False,
         allow_covar_forecast: bool = False,
+        covar_quantile_levels: List[float] | None = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         **kwargs
     ) -> Dict[str, torch.Tensor]:
         """Extract context and target tensors of the forecasting task.
@@ -384,6 +430,8 @@ class TSICL:
         coords_c = grid[:,(grid_threshold-lookback_len):grid_threshold]
         coords_t = grid[:,grid_threshold:(grid_threshold+horizon_len)]
 
+        covar_t_quantiles = None
+
         # handle covar:
         if has_covar:
 
@@ -407,20 +455,44 @@ class TSICL:
 
             # covariates_c: (b, c, t, 1)
 
-            # optionally, forecast past-only covariates and use as GT:
-            if (not covar_on_future) and (allow_covar_forecast):
-                covar_t, _ = self.forecast(
-                    inputs            = rearrange(covariates_c, 'b c t 1 -> b t c'),
-                    prediction_length = horizon_len,
-                    batch_size        = len(covariates_c),
-                    device            = self._device,
-                    denormalize       = True,
-                    point_estimator   = 'median',
-                    squeeze_output    = False
+            # optionally, forecast past-only covariates (median or K quantile trajectories for Case B):
+            use_q_mix = covar_quantile_levels is not None and len(covar_quantile_levels) > 1
+            if (not covar_on_future) and allow_covar_forecast:
+                b_cov, c_cov, _, _ = covariates_c.shape
+                predicted = self._forecast_covariate_channels(
+                    covar_series          = rearrange(covariates_c, 'b c t 1 -> (b c) t'),
+                    horizon_len           = horizon_len,
+                    batch_size            = max(1, b_cov),
+                    device                = series_c.device,
+                    covar_quantile_levels = covar_quantile_levels if use_q_mix else None,
                 )
+                if use_q_mix:
+                    covar_t_quantiles = rearrange(predicted, '(b c) h k -> b c h k', b=b_cov, c=c_cov)
+                    mid = covar_t_quantiles.shape[-1] // 2
+                    covar_t = covar_t_quantiles[..., mid:mid+1]
+                else:
+                    covar_t = rearrange(predicted, '(b c) h 1 -> b c h 1', b=b_cov, c=c_cov)
                 covar_on_future = True
-                assert isinstance(covar_t, torch.Tensor)
-                covar_t = covar_t.to(series_c.device)
+            elif covar_on_future and allow_covar_forecast:
+                past_only = covar_t.isnan().all(dim=-2).squeeze(-1)
+                if past_only.any():
+                    forecast_inputs = covariates_c.squeeze(-1)[past_only]
+                    predicted = self._forecast_covariate_channels(
+                        covar_series          = forecast_inputs,
+                        horizon_len           = horizon_len,
+                        batch_size            = max(1, len(covariates_c)),
+                        device                = series_c.device,
+                        covar_quantile_levels = covar_quantile_levels if use_q_mix else None,
+                    )
+                    if use_q_mix:
+                        K = predicted.shape[-1]
+                        covar_t_quantiles = covar_t.repeat(1, 1, 1, K).clone()
+                        covar_t_quantiles[past_only] = predicted
+                        mid = K // 2
+                        covar_t = covar_t_quantiles[..., mid:mid+1]
+                    else:
+                        covar_t = covar_t.clone()
+                        covar_t[past_only] = predicted
         else:
             covariates_c, covar_t = None, None
 
@@ -438,6 +510,8 @@ class TSICL:
         if covar_on_future:
             assert isinstance(covar_t, torch.Tensor)
             out['covar_t'] = covar_t # (bs, C, query_seq_len, 1)
+        if covar_t_quantiles is not None:
+            out['covar_t_quantiles'] = covar_t_quantiles # (bs, C, query_seq_len, K)
 
         return out
     
@@ -645,6 +719,7 @@ class TSICL:
         point_estimator: Literal['mean', 'median'] = 'mean',
         allow_auto_complete: bool = False,
         allow_covar_forecast: bool = False,
+        covar_quantile_levels: List[float] | None = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         squeeze_output: bool = True
     ) -> Tuple[torch.Tensor | List[torch.Tensor], torch.Tensor | List[torch.Tensor]]:
         """
@@ -773,8 +848,9 @@ class TSICL:
             device               = device,
             denormalize          = denormalize,
             point_estimator      = point_estimator,
-            allow_auto_complete  = allow_auto_complete,
-            allow_covar_forecast = allow_covar_forecast
+            allow_auto_complete   = allow_auto_complete,
+            allow_covar_forecast  = allow_covar_forecast,
+            covar_quantile_levels = covar_quantile_levels
         )
         if squeeze_output:
             mean      = mean.squeeze() if isinstance(mean, torch.Tensor) else [x.squeeze() for x in mean]
@@ -1055,7 +1131,8 @@ class TSICL:
         prediction_length: int,
         denormalize: bool,
         allow_auto_complete: bool = False,
-        allow_covar_forecast: bool = False
+        allow_covar_forecast: bool = False,
+        covar_quantile_levels: List[float] | None = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     ) -> torch.Tensor:
         """Forecasting wrapper.
 
@@ -1085,11 +1162,38 @@ class TSICL:
                 if covar_on_future:
                     assert covar_len == prediction_length + series_c.shape[-2]
                 
-                covar_past    = covariates[...,:series_c.shape[-2],:]
-                covar_horizon = covariates[...,series_c.shape[-2]:,:] if covar_on_future else \
-                    torch.nan * torch.ones(*covariates.shape[:-2], prediction_length, 1).to(covariates.device)
-                
-                covariates_ii = covariates[...,:series_c.shape[-2]+self.max_target_length,:] if covar_on_future else covariates
+                covar_past = covariates[..., :series_c.shape[-2], :]
+                if covar_on_future:
+                    covar_horizon = covariates[..., series_c.shape[-2]:, :]
+                    if allow_covar_forecast:
+                        past_only = covar_horizon.isnan().all(dim=-2).squeeze(-1)
+                        if past_only.any():
+                            hist = covar_past[..., -self.this_context_length:, :].squeeze(-1)[past_only]
+                            predicted = self._forecast_covariate_channels(
+                                covar_series          = hist,
+                                horizon_len           = prediction_length,
+                                batch_size            = max(1, len(covar_past)),
+                                device                = covariates.device,
+                                covar_quantile_levels = None,
+                            )
+                            covar_horizon = covar_horizon.clone()
+                            covar_horizon[past_only] = predicted
+                elif allow_covar_forecast:
+                    hist = covar_past[..., -self.this_context_length:, :]
+                    b_cov, c_cov, _, _ = hist.shape
+                    predicted = self._forecast_covariate_channels(
+                        covar_series          = rearrange(hist, 'b c t 1 -> (b c) t'),
+                        horizon_len           = prediction_length,
+                        batch_size            = max(1, b_cov),
+                        device                = covariates.device,
+                        covar_quantile_levels = None,
+                    )
+                    covar_horizon = rearrange(predicted, '(b c) h 1 -> b c h 1', b=b_cov, c=c_cov)
+                    covar_on_future = True
+                else:
+                    covar_horizon = torch.nan * torch.ones(*covariates.shape[:-2], prediction_length, 1).to(covariates.device)
+
+                covariates_ii = covariates[..., :series_c.shape[-2]+self.max_target_length, :] if covar_on_future else covariates
 
             for ii in range(n_rollouts):
 
@@ -1116,8 +1220,9 @@ class TSICL:
                     setting              = 'forecasting',
                     denormalize          = True,
                     save_scaler          = (ii==0),
-                    allow_auto_complete  = allow_auto_complete,
-                    allow_covar_forecast = allow_covar_forecast       
+                    allow_auto_complete   = allow_auto_complete,
+                    allow_covar_forecast  = allow_covar_forecast,
+                    covar_quantile_levels = covar_quantile_levels
                 )
 
                 yhat.append(yhat_ii)
@@ -1152,8 +1257,9 @@ class TSICL:
                 setting              = 'forecasting',
                 denormalize          = denormalize,
                 save_scaler          = not denormalize,
-                allow_auto_complete  = allow_auto_complete,
-                allow_covar_forecast = allow_covar_forecast
+                allow_auto_complete   = allow_auto_complete,
+                allow_covar_forecast  = allow_covar_forecast,
+                covar_quantile_levels = covar_quantile_levels
             )
             
         return yhat
@@ -1282,19 +1388,47 @@ class TSICL:
                 grid = grid, series_c = series_c, covariates = covariates, **kwargs
             )
         
-        # predict:
-        yhat = self._predict_batch(
-            series_c           = processed_inputs['series_c'], # (bs, max_context_len, 1)
-            coords_c           = processed_inputs['coords_c'], # (bs, max_context_len, 1)
-            coords_t           = processed_inputs['coords_t'], # (bs, query_seq_len, 1)
-            covar_c            = processed_inputs['covar_c'] if has_covar else None,
-            covar_t            = processed_inputs.get('covar_t') if has_covar else None,
-            setting            = setting,
-            denormalize        = denormalize,
-            save_scaler        = save_scaler,
-            return_latent_only = return_latent_only,
-            **kwargs
-        )
+        # predict (if Case B quantile trajectories are present, mix the K output distributions):
+        if has_covar and ('covar_t_quantiles' in processed_inputs) and (not return_latent_only):
+            covar_t_q = processed_inputs['covar_t_quantiles'] # (bs, C, query_seq_len, K)
+            K = covar_t_q.shape[-1]
+            all_k_preds = []
+            for k in range(K):
+                q_k = self._predict_batch(
+                    series_c           = processed_inputs['series_c'],
+                    coords_c           = processed_inputs['coords_c'],
+                    coords_t           = processed_inputs['coords_t'],
+                    covar_c            = processed_inputs['covar_c'],
+                    covar_t            = covar_t_q[..., k:k+1],
+                    setting            = setting,
+                    denormalize        = denormalize,
+                    save_scaler        = (save_scaler and k == 0),
+                    return_latent_only = False,
+                    **kwargs
+                )
+                all_k_preds.append(q_k)
+            mixture = torch.cat(all_k_preds, dim=-1) # (bs, query_seq_len, K * nb_quantiles)
+            q_grid = torch.linspace(
+                self.forecaster.tf_icl.start_quantile,
+                self.forecaster.tf_icl.end_quantile,
+                self.forecaster.tf_icl.nb_quantiles,
+                device=mixture.device,
+                dtype=mixture.dtype,
+            )
+            yhat = torch.quantile(mixture, q_grid, dim=-1).permute(1, 2, 0).contiguous()
+        else:
+            yhat = self._predict_batch(
+                series_c           = processed_inputs['series_c'], # (bs, max_context_len, 1)
+                coords_c           = processed_inputs['coords_c'], # (bs, max_context_len, 1)
+                coords_t           = processed_inputs['coords_t'], # (bs, query_seq_len, 1)
+                covar_c            = processed_inputs['covar_c'] if has_covar else None,
+                covar_t            = processed_inputs.get('covar_t') if has_covar else None,
+                setting            = setting,
+                denormalize        = denormalize,
+                save_scaler        = save_scaler,
+                return_latent_only = return_latent_only,
+                **kwargs
+            )
 
         return yhat
 
@@ -1367,7 +1501,9 @@ class TSICL:
         # z-normalize covariate series:
         if (covar_c is not None) and (covar_t is not None):
             scaler_cov = CustomStandardScaler(dim=-2,epsilon=1e-7)
-            scaler_cov.fit(covar_t) # type: ignore
+            # In forecasting, fit on historical context `covar_c` (not the future horizon `covar_t`)
+            # to avoid scale distortion on short/constant horizons or all-NaN future channels.
+            scaler_cov.fit(covar_c if setting == 'forecasting' else covar_t) # type: ignore
             covar_t      = scaler_cov.transform(covar_t)         # (bs, C, query_seq_len, 1)
             covar_c      = scaler_cov.transform(covar_c)         # (bs, C, max_context_len, 1)
             series_covar = torch.cat([covar_c, covar_t], dim=-2) # (bs, C, max_context_len + query_seq_len, 1)

@@ -208,19 +208,19 @@ def test_invalid_target_inputs_format_raise_value_error(
             'covar_1': torch.randn(5), 'covar_2': torch.randn(5)
         }} for _ in range(3)], True, (3,2,15,1), 2),
 
-        # past + future covariates future subset of past
+        # past + future covariates future subset of past (all past channels preserved, missing future padded with NaN)
         ([{'past_covariates': {
             'covar_1': torch.randn(10), 'covar_2': torch.randn(10)
         }, 'future_covariates': {
             'covar_2': torch.randn(5)
-        }} for _ in range(3)], True, (3,1,15,1), 1),
+        }} for _ in range(3)], True, (3,2,15,1), 2),
 
         # past + future covariates future subset of past (numpy)
         ([{'past_covariates': {
             'covar_1': np.random.rand(10), 'covar_2': np.random.rand(10)
         }, 'future_covariates': {
             'covar_2': np.random.rand(5)
-        }} for _ in range(3)], True, (3,1,15,1), 1),
+        }} for _ in range(3)], True, (3,2,15,1), 2),
 
     ]
 )
