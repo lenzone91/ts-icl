@@ -303,6 +303,37 @@ class TSICL:
     # TASK UTILS
     # ---------------
 
+    def _forecast_covariate_channels(
+        self,
+        covar_series: torch.Tensor,
+        horizon_len: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Forecast 1D historical covariate series safely (all-NaN channels stay NaN)."""
+        valid_mask = (~covar_series.isnan()).any(dim=1)
+        out = torch.full(
+            (len(covar_series), horizon_len, 1),
+            float('nan'),
+            device=device,
+            dtype=covar_series.dtype,
+        )
+        if valid_mask.any():
+            valid_inputs = covar_series[valid_mask]
+            predicted, _ = self.forecast(
+                inputs            = valid_inputs,
+                prediction_length = horizon_len,
+                context_length    = self.this_context_length,
+                batch_size        = min(len(valid_inputs), max(1, batch_size)),
+                device            = self._device,
+                denormalize       = True,
+                point_estimator   = 'median',
+                squeeze_output    = False,
+            )
+            assert isinstance(predicted, torch.Tensor)
+            out[valid_mask] = predicted.squeeze(1).to(device=device, dtype=covar_series.dtype)
+        return out
+
     def _get_context_target_coords_f(
         self,
         grid: torch.Tensor,
@@ -407,20 +438,29 @@ class TSICL:
 
             # covariates_c: (b, c, t, 1)
 
-            # optionally, forecast past-only covariates and use as GT:
-            if (not covar_on_future) and (allow_covar_forecast):
-                covar_t, _ = self.forecast(
-                    inputs            = rearrange(covariates_c, 'b c t 1 -> b t c'),
-                    prediction_length = horizon_len,
-                    batch_size        = len(covariates_c),
-                    device            = self._device,
-                    denormalize       = True,
-                    point_estimator   = 'median',
-                    squeeze_output    = False
+            # optionally, forecast past-only covariates (including past-only channels in mixed sets):
+            if (not covar_on_future) and allow_covar_forecast:
+                b_cov, c_cov, _, _ = covariates_c.shape
+                predicted = self._forecast_covariate_channels(
+                    covar_series = rearrange(covariates_c, 'b c t 1 -> (b c) t'),
+                    horizon_len  = horizon_len,
+                    batch_size   = max(1, b_cov),
+                    device       = series_c.device,
                 )
+                covar_t = rearrange(predicted, '(b c) h 1 -> b c h 1', b=b_cov, c=c_cov)
                 covar_on_future = True
-                assert isinstance(covar_t, torch.Tensor)
-                covar_t = covar_t.to(series_c.device)
+            elif covar_on_future and allow_covar_forecast:
+                past_only = covar_t.isnan().all(dim=-2).squeeze(-1)
+                if past_only.any():
+                    forecast_inputs = covariates_c.squeeze(-1)[past_only]
+                    predicted = self._forecast_covariate_channels(
+                        covar_series = forecast_inputs,
+                        horizon_len  = horizon_len,
+                        batch_size   = max(1, len(covariates_c)),
+                        device       = series_c.device,
+                    )
+                    covar_t = covar_t.clone()
+                    covar_t[past_only] = predicted
         else:
             covariates_c, covar_t = None, None
 
@@ -1085,11 +1125,36 @@ class TSICL:
                 if covar_on_future:
                     assert covar_len == prediction_length + series_c.shape[-2]
                 
-                covar_past    = covariates[...,:series_c.shape[-2],:]
-                covar_horizon = covariates[...,series_c.shape[-2]:,:] if covar_on_future else \
-                    torch.nan * torch.ones(*covariates.shape[:-2], prediction_length, 1).to(covariates.device)
-                
-                covariates_ii = covariates[...,:series_c.shape[-2]+self.max_target_length,:] if covar_on_future else covariates
+                covar_past = covariates[..., :series_c.shape[-2], :]
+                if covar_on_future:
+                    covar_horizon = covariates[..., series_c.shape[-2]:, :]
+                    if allow_covar_forecast:
+                        past_only = covar_horizon.isnan().all(dim=-2).squeeze(-1)
+                        if past_only.any():
+                            hist = covar_past[..., -self.this_context_length:, :].squeeze(-1)[past_only]
+                            predicted = self._forecast_covariate_channels(
+                                covar_series = hist,
+                                horizon_len  = prediction_length,
+                                batch_size   = max(1, len(covar_past)),
+                                device       = covariates.device,
+                            )
+                            covar_horizon = covar_horizon.clone()
+                            covar_horizon[past_only] = predicted
+                elif allow_covar_forecast:
+                    hist = covar_past[..., -self.this_context_length:, :]
+                    b_cov, c_cov, _, _ = hist.shape
+                    predicted = self._forecast_covariate_channels(
+                        covar_series = rearrange(hist, 'b c t 1 -> (b c) t'),
+                        horizon_len  = prediction_length,
+                        batch_size   = max(1, b_cov),
+                        device       = covariates.device,
+                    )
+                    covar_horizon = rearrange(predicted, '(b c) h 1 -> b c h 1', b=b_cov, c=c_cov)
+                    covar_on_future = True
+                else:
+                    covar_horizon = torch.nan * torch.ones(*covariates.shape[:-2], prediction_length, 1).to(covariates.device)
+
+                covariates_ii = covariates[..., :series_c.shape[-2]+self.max_target_length, :] if covar_on_future else covariates
 
             for ii in range(n_rollouts):
 
@@ -1367,7 +1432,9 @@ class TSICL:
         # z-normalize covariate series:
         if (covar_c is not None) and (covar_t is not None):
             scaler_cov = CustomStandardScaler(dim=-2,epsilon=1e-7)
-            scaler_cov.fit(covar_t) # type: ignore
+            # In forecasting, fit on historical context `covar_c` (not the future horizon `covar_t`)
+            # to avoid scale distortion on short/constant horizons or all-NaN future channels.
+            scaler_cov.fit(covar_c if setting == 'forecasting' else covar_t) # type: ignore
             covar_t      = scaler_cov.transform(covar_t)         # (bs, C, query_seq_len, 1)
             covar_c      = scaler_cov.transform(covar_c)         # (bs, C, max_context_len, 1)
             series_covar = torch.cat([covar_c, covar_t], dim=-2) # (bs, C, max_context_len + query_seq_len, 1)

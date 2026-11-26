@@ -191,7 +191,8 @@ def _predict_window(
     quantile_levels: list[float],
     max_context_length: int,
     batch_size: int = 64,
-    device_map: str = "cuda"
+    device_map: str = "cuda",
+    allow_covar_forecast: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (quantiles[N, T, Q], means[N, T]) for a single FEV window."""
     
@@ -216,14 +217,15 @@ def _predict_window(
             # model inference:
             with torch.no_grad():
                 _, batch_q = model.forecast(
-                        inputs            = batch_clean,
-                        prediction_length = horizon,
-                        batch_size        = batch_size,
-                        quantile_levels   = quantile_levels,
-                        context_length    = max_context_length,
-                        device            = torch.device(device_map),
-                        denormalize       = True,
-                        squeeze_output    = False
+                        inputs               = batch_clean,
+                        prediction_length    = horizon,
+                        batch_size           = batch_size,
+                        quantile_levels      = quantile_levels,
+                        context_length       = max_context_length,
+                        device               = torch.device(device_map),
+                        denormalize          = True,
+                        allow_covar_forecast = allow_covar_forecast,
+                        squeeze_output       = False
                 )
                 # since fev tasks are homogenous, we can safely stack the list of tensors into a single tensor
                 if isinstance(batch_q, list):
@@ -265,6 +267,7 @@ def run_tsicl_experiment(
     use_covariates: bool = False,
     use_static_covariates: bool = False,
     past_only: bool = False,
+    allow_covar_forecast: bool = False,
     quantile_levels: list[float] | None = None,
     make_plots: bool = False,
     max_nb_plots: int = 3
@@ -310,13 +313,13 @@ def run_tsicl_experiment(
         print(f"Infos: {target_columns=}, {past_dynamic_columns=}, {known_dynamic_columns=}")
 
         if past_only:
-            past_dynamic_columns = [col for col in known_dynamic_columns if col in past_dynamic_columns]
+            past_dynamic_columns = list(dict.fromkeys([*past_dynamic_columns, *known_dynamic_columns]))
             known_dynamic_columns = []
 
             inputs = [
                 {
-                    "target"          : x["target"],
-                    "past_covariates" : x["past_covariates"]
+                    "target" : x["target"],
+                    **({"past_covariates": x["past_covariates"]} if "past_covariates" in x else {}),
                 } for x in inputs
             ]
         
@@ -333,7 +336,8 @@ def run_tsicl_experiment(
             quantile_levels       = quantile_levels,
             max_context_length    = max_context_length,
             batch_size            = batch_size,
-            device_map            = device_map
+            device_map            = device_map,
+            allow_covar_forecast  = allow_covar_forecast,
         )
         inference_time += time() - t0
         nb_samples += len(quantiles_np)
@@ -425,6 +429,7 @@ def run_tsicl_experiment(
             "quantile_levels"       : quantile_levels,
             "use_covariates"        : use_covariates,
             "use_static_covariates" : use_static_covariates,
+            "allow_covar_forecast"  : allow_covar_forecast,
         },
         "nb_samples" : nb_samples
     }
@@ -523,6 +528,8 @@ def main(cfg : DictConfig):
                 max_context_length    = getattr(cfg, "context_length", 2048),
                 use_covariates        = use_covariates,
                 use_static_covariates = use_static_covariates,
+                past_only             = bool(getattr(cfg, "past_only", False)),
+                allow_covar_forecast  = bool(getattr(cfg, "allow_covar_forecast", True)),
                 quantile_levels       = list(
                     getattr(cfg, "quantiles", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
                 ),

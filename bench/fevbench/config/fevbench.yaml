@@ -17,5 +17,6 @@ to_univariate: True
 use_covariates: False
 use_static_covariates: False
 past_only: False
+allow_covar_forecast: True
 
 seed: 42
