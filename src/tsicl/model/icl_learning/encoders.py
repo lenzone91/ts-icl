@@ -8,8 +8,6 @@ from typing import Callable, Optional
 from torch import Tensor, nn
 
 from .layers import MultiheadAttentionBlock
-from .rope import RotaryEmbedding
-
 
 class Encoder(nn.Module):
     """Stack of multihead attention blocks.
@@ -34,15 +32,6 @@ class Encoder(nn.Module):
     activation : str or unary callable, default="gelu"
         The activation function used in the feedforward network, can be
         either string ("relu" or "gelu") or unary callable
-
-    norm_first : bool, default=True
-        If True, uses pre-norm architecture (LayerNorm before attention and feedforward)
-
-    use_rope : bool, default=False
-        Whether to use rotary positional encoding
-
-    rope_base : int, default=100000
-        A base scaling factor for rotary position encoding
     """
 
     def __init__(
@@ -53,9 +42,6 @@ class Encoder(nn.Module):
         dim_feedforward: int,
         dropout: float = 0.0,
         activation: str | Callable[[Tensor], Tensor] = "gelu",
-        norm_first: bool = True,
-        use_rope: bool = False,
-        rope_base: int = 100000,
     ):
         super().__init__()
 
@@ -70,20 +56,12 @@ class Encoder(nn.Module):
                     dim_feedforward = dim_feedforward,
                     dropout         = dropout,
                     activation      = activation,
-                    norm_first      = norm_first,
                 )
                 for _ in range(num_blocks)
             ]
         )
 
-        self.rope = RotaryEmbedding(dim=d_model // nhead, theta=rope_base) if use_rope else None
-
-    def forward(
-        self,
-        src: Tensor,
-        key_padding_mask: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor | int] = None,
-    ) -> Tensor:
+    def forward(self, src: Tensor, train_size: int) -> Tensor:
         """Process input through the stacked blocks.
 
         Parameters
@@ -91,27 +69,17 @@ class Encoder(nn.Module):
         src : Tensor
             Input tensor of shape (..., seq_len, d_model)
 
-        key_padding_mask : Optional[Tensor], default=None
-            Mask of shape (..., src_len) that identifies padding elements
-            in the key sequence to be ignored:
-              - For binary masks: True values indicate positions to ignore
-              - For float masks: Values are directly added to attention scores
-
-        attn_mask : Optional[Tensor | int], default=None
-            Controls attention pattern in two possible ways:
-            1. When provided as Tensor: Traditional mask preventing attention to certain positions
-              - Shape: (tgt_len, src_len) or (..., num_heads, tgt_len, src_len)
-            2. When provided as integer: Creates a split attention pattern where:
-              - The first `attn_mask` tokens perform self-attention only (attend to themselves)
-              - The remaining tokens attend only to the first `attn_mask` tokens
+        train_size : int
+            Creates a split attention pattern where:
+              - The first `train_size` tokens perform self-attention only (attend to themselves)
+              - The remaining tokens attend only to the first `train_size` tokens
 
         Returns
         -------
         Tensor
             Output tensor of shape (..., seq_len, d_model)
         """
-        out = src
         for block in self.blocks:
-            out = block(q=out, key_padding_mask=key_padding_mask, attn_mask=attn_mask, rope=self.rope)
+            out = block(x=src, train_size=train_size)
 
         return out

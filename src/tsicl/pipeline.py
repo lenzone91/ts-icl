@@ -147,6 +147,10 @@ class TSICL:
             for k in ("include_pos_in_value", "use_kl", "headwise_attn_output_gate", "decoder_ff", "encode_geo", "bottleneck_index"):
                 if k in self.model_config["encoder"]:
                     del self.model_config["encoder"][k]
+        if "head" in self.model_config:
+            for k in ("quantile_median", "norm_first"):
+                if k in self.model_config["head"]:
+                    del self.model_config["head"][k]
 
         self.forecaster: TSICLNetwork = instantiate(self.model_config)
         self.imputer: TSICLNetwork = instantiate(self.model_config)

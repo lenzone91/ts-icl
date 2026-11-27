@@ -3,110 +3,19 @@
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Callable
 
-import torch.nn.functional as F
+import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from .attention import multi_head_attention_forward
-from .rope import RotaryEmbedding
 
-
-class MLP(nn.Module):
-    """Multi-layer perceptron with configurable architecture.
-
-    Parameters
-    ----------
-    in_dim : int
-        Input feature dimension
-
-    out_dim : Optional[int], default=None
-        Output dimension. If None, uses the last hidden dimension
-
-    hidden_dims : List[int], default=[256, 256, 256]
-        Dimensions of hidden layers
-
-    activation : str, default='gelu'
-        Activation function: 'relu', 'gelu', 'leaky_relu', or 'tanh'
-
-    bias : bool, default=True
-        Whether to include bias terms in linear layers
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: Optional[int] = None,
-        hidden_dims: List[int] = [256, 256, 256],
-        activation: str = "gelu",
-        bias: bool = True,
-    ):
-        super().__init__()
-        # Build network architecture
-        act_fn = self.get_activation(activation)
-        layers = []
-
-        # Create hidden layers with activations
-        prev_dim = in_dim
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim, bias=bias))
-            layers.append(act_fn())
-            prev_dim = hidden_dim
-
-        # Optional output projection
-        if out_dim is not None:
-            layers.append(nn.Linear(prev_dim, out_dim, bias=bias))
-
-        self.net = nn.Sequential(*layers)
-
-    @staticmethod
-    def get_activation(activation: str) -> nn.Module:
-        """Get activation function class from string name.
-
-        Parameters
-        ----------
-        activation : str
-            Name of activation function
-
-        Returns
-        -------
-        class
-            PyTorch activation function class
-        """
-
-        activation_map = {
-            "relu": nn.ReLU,
-            "leaky_relu": nn.LeakyReLU,
-            "gelu": nn.GELU,
-            "tanh": nn.Tanh,
-        }
-
-        if activation not in activation_map:
-            raise ValueError(f"Unknown activation: {activation}. Supported: {list(activation_map.keys())}")
-
-        return activation_map[activation]
-
-    def forward(self, X: Tensor) -> Tensor:
-        """Forward pass through the MLP.
-
-        Parameters
-        ----------
-        X : Tensor
-            Input tensor of shape (..., in_dim)
-
-        Returns
-        -------
-        Tensor
-            Output tensor of shape (..., out_dim or last_hidden_dim)
-        """
-        return self.net(X)
-
-
-class MultiheadAttention(nn.MultiheadAttention):
+class MultiheadAttention(nn.Module):
     """Enhanced multi-head attention with rotary positional embedding support.
 
     This extends PyTorch's MultiheadAttention to support rotary position embeddings (RoPE)
-    and specialized attention masking when `attn_mask` is an integer. The implementation always
+    and specialized attention masking when `train_size` is an integer. The implementation always
     uses `batch_first=True`, meaning all input tensors have shape (..., seq_len, embed_dim).
 
     Parameters
@@ -127,46 +36,32 @@ class MultiheadAttention(nn.MultiheadAttention):
     """
 
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
-        super().__init__(embed_dim, num_heads, dropout, batch_first=True)
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim))
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self._reset_parameters()
 
-    def forward(
-        self,
-        query: Tensor,
-        key: Tensor,
-        value: Tensor,
-        key_padding_mask: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor | int] = None,
-        rope: Optional[RotaryEmbedding] = None,
-    ) -> Tensor:
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        nn.init.constant_(self.in_proj_bias, 0.0)
+        nn.init.constant_(self.out_proj.bias, 0.0)
+
+    def forward(self, x: Tensor, train_size: int) -> Tensor:
         """Compute multi-head attention with support for rotary positional encoding.
 
         Parameters
         ----------
-        query : Tensor
-            Query tensor of shape (..., tgt_len, embed_dim)
+        x : Tensor
+            Input tensor of shape (..., tgt_len, embed_dim)
 
-        key : Tensor
-            Key tensor of shape (..., src_len, embed_dim)
-
-        value : Tensor
-            Value tensor of shape (..., src_len, embed_dim)
-
-        key_padding_mask : Optional[Tensor], default=None
-            Mask of shape (..., src_len) that identifies padding elements
-            in the key sequence to be ignored:
-              - For binary masks: True values indicate positions to ignore
-              - For float masks: Values are directly added to attention scores
-
-        attn_mask : Optional[Tensor | int], default=None
-            Controls attention pattern in two possible ways:
-            1. When provided as Tensor: Traditional mask preventing attention to certain positions
-              - Shape: (tgt_len, src_len) or (..., num_heads, tgt_len, src_len)
-            2. When provided as integer: Creates a split attention pattern where:
-              - The first `attn_mask` tokens perform self-attention only (attend to themselves)
-              - The remaining tokens attend only to the first `attn_mask` tokens
-
-        rope : Optional[RotaryEmbedding]
-            Rotary positional encoding
+        train_size : int
+            Creates a split attention pattern where:
+              - The first `train_size` tokens perform self-attention only (attend to themselves)
+              - The remaining tokens attend only to the first `train_size` tokens
 
         Returns
         -------
@@ -174,14 +69,8 @@ class MultiheadAttention(nn.MultiheadAttention):
             Attention output of shape (..., tgt_len, embed_dim)
         """
 
-        if isinstance(attn_mask, int):
-            assert key_padding_mask is None, "key_padding_mask is not supported with attn_mask as int"
-            assert rope is None, "Rotary position embedding is not supported with attn_mask as int"
-
         return multi_head_attention_forward(
-            query,
-            key,
-            value,
+            x,
             self.num_heads,
             self.in_proj_weight,
             self.in_proj_bias,
@@ -189,13 +78,11 @@ class MultiheadAttention(nn.MultiheadAttention):
             self.out_proj.weight,
             self.out_proj.bias,
             training=self.training,
-            key_padding_mask=key_padding_mask,
-            attn_mask=attn_mask,
-            rope=rope,
+            train_size=train_size,
         )
 
 
-class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
+class MultiheadAttentionBlock(nn.Module):
     """Attention block supporting rotary positional encoding.
 
     Parameters
@@ -215,9 +102,6 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
     activation : str or unary callable, default="gelu"
         The activation function used in the feedforward network, can be
         either string ("relu" or "gelu") or unary callable
-
-    norm_first : bool, default=True
-        If True, uses pre-norm architecture (LayerNorm before attention and feedforward)
     """
 
     def __init__(
@@ -227,60 +111,46 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
         dim_feedforward: int,
         dropout: float = 0.0,
         activation: str | Callable[[Tensor], Tensor] = "gelu",
-        norm_first: bool = True,
     ):
-        super().__init__(d_model, nhead, dim_feedforward, dropout, activation, norm_first=norm_first, batch_first=True)
-        del self.self_attn
+        super().__init__()
         self.attn = MultiheadAttention(d_model, nhead, dropout)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        if isinstance(activation, str):
+            activations = {"relu": F.relu, "gelu": F.gelu}
+            if activation not in activations:
+                raise ValueError(f"Unknown activation: {activation}")
+            self.activation = activations[activation]
+        else:
+            self.activation = activation
+
         self.init_weights()
 
     def init_weights(self):
-        """Initialize projection layers to zero for stable training."""
+        """Initialize residual output projections to zero for stable training."""
         nn.init.zeros_(self.attn.out_proj.weight)
         nn.init.zeros_(self.attn.out_proj.bias)
         nn.init.zeros_(self.linear2.weight)
         nn.init.zeros_(self.linear2.bias)
 
-    def forward(
-        self,
-        q: Tensor,
-        k: Optional[Tensor] = None,
-        v: Optional[Tensor] = None,
-        key_padding_mask: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor | int] = None,
-        rope: Optional[RotaryEmbedding] = None,
-    ) -> Tensor:
+    def forward(self, x: Tensor, train_size: int) -> Tensor:
         """Process input through attention with optional rotary positional encoding.
 
         Parameters
         ----------
-        q : Tensor
-            Query tensor of shape (..., tgt_len, d_model)
+        x : Tensor
+            Input tensor of shape (..., tgt_len, d_model)
 
-        k : Tensor
-            Key tensor of shape (..., src_len, d_model)
-            If None, uses q for self-attention.
-
-        v : Tensor
-            Value tensor of shape (..., src_len, d_model)
-            If None, uses q for self-attention.
-
-        key_padding_mask : Optional[Tensor], default=None
-            Mask of shape (..., src_len) that identifies padding elements
-            in the key sequence to be ignored:
-              - For binary masks: True values indicate positions to ignore
-              - For float masks: Values are directly added to attention scores
-
-        attn_mask : Optional[Tensor | int], default=None
-            Controls attention pattern in two possible ways:
-            1. When provided as Tensor: Traditional mask preventing attention to certain positions
-              - Shape: (tgt_len, src_len) or (..., num_heads, tgt_len, src_len)
-            2. When provided as integer: Creates a split attention pattern where:
-              - The first `attn_mask` tokens perform self-attention only (attend to themselves)
-              - The remaining tokens attend only to the first `attn_mask` tokens
-
-        rope : Optional[RotaryEmbedding]
-            Rotary positional encoding
+        train_size : int, default=None
+            Creates a split attention pattern where:
+              - The first `train_size` tokens perform self-attention only (attend to themselves)
+              - The remaining tokens attend only to the first `train_size` tokens
 
         Returns
         -------
@@ -288,64 +158,13 @@ class MultiheadAttentionBlock(nn.TransformerEncoderLayer):
             Output tensor of shape (..., tgt_len, d_model)
         """
 
-        if isinstance(attn_mask, int):
-            assert key_padding_mask is None, "key_padding_mask is not supported with attn_mask as int"
-            assert rope is None, "Rotary position embedding is not supported with attn_mask as int"
-        else:
-            # Convert masks to correct dtype for compatibility
-            key_padding_mask = F._canonical_mask(
-                mask=key_padding_mask,
-                mask_name="key_padding_mask",
-                other_type=F._none_or_dtype(attn_mask),
-                other_name="src_mask",
-                target_type=q.dtype,
-            )
-            attn_mask = F._canonical_mask(
-                mask=attn_mask,
-                mask_name="attn_mask",
-                other_type=None,
-                other_name="",
-                target_type=q.dtype,
-                check_other=False,
-            )
-
-        # Use q as k,v if not provided
-        # k = q if k is None else k
-        # v = q if v is None else v
-
-        # Apply layer depending on normalization order
-        x = q
-        if self.norm_first:
-            # Pre-norm: normalize before attention and FFN
-            attn = self._attn_block(
-                self.norm1(q),
-                self.norm1(q if k is None else k),
-                self.norm1(q if v is None else v),
-                key_padding_mask,
-                attn_mask,
-                rope
-            )
-            x = x + attn
-            x = x + self._ff_block(self.norm2(x))
-        else:
-            # Post-norm: normalize after attention and FFN
-            attn = self._attn_block(q, q if k is None else k, q if v is None else v, key_padding_mask, attn_mask, rope)
-            x = self.norm1(x + attn)
-            x = self.norm2(x + self._ff_block(x))
-
+        # Pre-norm: normalize before attention and FFN
+        x = x + self._attn_block(self.norm1(x), train_size)
+        x = x + self._ff_block(self.norm2(x))
         return x
 
-    def _attn_block(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        key_padding_mask: Optional[Tensor],
-        attn_mask: Optional[Tensor | int],
-        rope: Optional[RotaryEmbedding],
-    ) -> Tensor:
-        attn = self.attn(q, k, v, key_padding_mask, attn_mask, rope)
-        return self.dropout1(attn)
+    def _attn_block(self, x: Tensor, train_size: int) -> Tensor:
+        return self.dropout1(self.attn(x, train_size))
 
     def _ff_block(self, x: Tensor) -> Tensor:
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))

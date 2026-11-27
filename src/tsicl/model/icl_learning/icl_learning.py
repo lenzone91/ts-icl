@@ -14,43 +14,36 @@ from .encoders import Encoder
 # https://github.com/soda-inria/tabicl/tree/main
 
 class ICLearningCrossAttn(nn.Module):
-    """Dataset-wise in-context learning with automatic hierarchical classification support.
+    """In-context quantile regressor with cross-attention over target values and covariates.
 
-    This module implements in-context learning that:
-    1. Takes row representations and training labels as input
-    2. Conditions the model on training examples
-    3. Makes predictions for test examples based on learned patterns
-    4. Automatically handles both small and large label spaces
+    1. Embeds context target values and optional covariates into each timestep via cross-attention.
+    2. Conditions target timesteps on context timesteps via split self-attention (`Encoder`).
+    3. Predicts `nb_quantiles` quantiles for each target timestep.
 
     Parameters
     ----------
     d_model : int
-        Model dimension
-
+        Model dimension.
     num_blocks : int
-        Number of blocks used in the ICL encoder (MHA + RoPE)
-
+        Number of attention blocks in the ICL encoder.
     nhead : int
-        Number of attention heads of the ICL encoder
-
+        Number of attention heads in the ICL encoder.
     dim_feedforward : int
-        Dimension of the feedforward network of the ICL encoder
-
-    cross_heads : int
-        Number of cross-attn heads used to embed the values and covar
-
-    cross_dim_head : int
-        Dim of each cross-attn head used to embed the values and covar
-
+        Hidden dimension of the feedforward network in the ICL encoder.
+    cross_heads : int, default=4
+        Number of cross-attention heads used to embed values and covariates.
+    cross_dim_head : int, default=64
+        Dimension of each cross-attention head.
     dropout : float, default=0.0
-        Dropout probability
-
-    activation : str or unary callable, default="gelu"
-        The activation function used in the feedforward network, can be
-        either string ("relu" or "gelu") or unary callable
-
-    norm_first : bool, default=True
-        If True, uses pre-norm architecture (LayerNorm before attention and feedforward)
+        Dropout probability.
+    activation : str or callable, default="gelu"
+        Activation function used in the feedforward network.
+    start_quantile : float, default=0.05
+        Lowest predicted quantile level.
+    end_quantile : float, default=0.95
+        Highest predicted quantile level.
+    nb_quantiles : int, default=19
+        Number of quantile levels predicted by the output head.
     """
 
     def __init__(
@@ -63,14 +56,11 @@ class ICLearningCrossAttn(nn.Module):
         cross_dim_head: int = 64,
         dropout: float = 0.0,
         activation: str | Callable[[Tensor], Tensor] = "gelu",
-        norm_first: bool = True,
         start_quantile: float = 0.05,
         end_quantile: float = 0.95,
         nb_quantiles: int = 19,
-        quantile_median: int = 9
     ):
         super().__init__()
-        self.norm_first = norm_first
 
         self.tf_icl = Encoder(
             num_blocks      = num_blocks,
@@ -79,10 +69,8 @@ class ICLearningCrossAttn(nn.Module):
             dim_feedforward = dim_feedforward,
             dropout         = dropout,
             activation      = activation,
-            norm_first      = norm_first,
         )
-        if self.norm_first:
-            self.ln = nn.LayerNorm(d_model)
+        self.ln = nn.LayerNorm(d_model)
 
         # value projector:
         self.y_encoder   = nn.Linear(1, d_model)
@@ -122,7 +110,6 @@ class ICLearningCrossAttn(nn.Module):
         self.start_quantile  = start_quantile
         self.end_quantile    = end_quantile
         self.nb_quantiles    = nb_quantiles
-        self.quantile_median = quantile_median
         self.d_model         = d_model
 
     def _icl_predictions(
@@ -131,19 +118,22 @@ class ICLearningCrossAttn(nn.Module):
         y_train: Tensor,
         y_cov: Tensor | None = None,
     ) -> Tensor:
-        """In-context learning predictions.
+        """Compute quantile predictions for all timesteps (context + target).
 
         Parameters
         ----------
-        R : Tensor
-            Row representations of shape (B, T, D) where:
-             - B is the number of tables
-             - T is the number of samples (rows)
-             - D is the dimension of row representations
+        R : Tensor of shape (B, T, D)
+            Per-timestep representations from the encoder, with context first (`[:train_size]`)
+            and target timesteps after (`[train_size:]`).
+        y_train : Tensor of shape (B, train_size, 1)
+            Observed context values.
+        y_cov : Tensor of shape (B, C, T_cov, 1), optional
+            Optional covariates (`T_cov == train_size` or `T_cov == T`), may contain NaNs.
 
-        y_train : Tensor of shape (B, train_size)
-            Training targets, where train_size is the position to split
-            the input into training and test data
+        Returns
+        -------
+        Tensor of shape (B, T, nb_quantiles)
+            Predicted quantiles for all timesteps.
         """
 
         train_size = y_train.shape[1]
@@ -233,16 +223,14 @@ class ICLearningCrossAttn(nn.Module):
         x_te = rearrange(x_te, '(b T) 1 d -> b T d', b=bs)
 
         # update feature tensor:
-        R[:, :train_size] = R[:, :train_size] + x_tr
-        R[:, train_size:] = R[:, train_size:] + x_te
+        R = R + torch.cat([x_tr, x_te], dim=1)
 
         # to tf icl:
-        src = self.tf_icl(R, attn_mask=train_size)
-        if self.norm_first:
-            src = self.ln(src)
+        src = self.tf_icl(R, train_size=train_size)
+        src = self.ln(src)
         
         # quantile head:
-        out = self.decoder(src)  # (B, T, 1)
+        out = self.decoder(src)  # (B, T, nb_quantiles)
 
         return out
 
@@ -252,24 +240,21 @@ class ICLearningCrossAttn(nn.Module):
         y_train: Tensor,
         y_cov: Tensor | None = None,
     ) -> Tensor:
-        """In-context learning based on learned row representations.
+        """Predict target quantiles conditioned on context observations and optional covariates.
 
         Parameters
         ----------
-        R : Tensor
-            Row representations of shape (B, T, D) where:
-             - B is the number of tables
-             - T is the number of samples (rows)
-             - D is the dimension of row representations
-
-        y_train : Tensor of shape (B, train_size)
-            Training targets, where train_size is the position to split
-            the input into training and test data
+        R : Tensor of shape (B, T, D)
+            Per-timestep representations from the encoder (`T = train_size + target_len`).
+        y_train : Tensor of shape (B, train_size, 1)
+            Observed context values.
+        y_cov : Tensor of shape (B, C, T_cov, 1), optional
+            Optional covariates (`T_cov == train_size` or `T_cov == T`), may contain NaNs.
 
         Returns
         -------
-        Tensor
-              Predictions of shape (B, T-train_size, 1), which will be further handled by the training code.
+        Tensor of shape (B, T - train_size, nb_quantiles)
+            Predicted quantiles at target timesteps.
         """
 
         train_size = y_train.shape[1]
