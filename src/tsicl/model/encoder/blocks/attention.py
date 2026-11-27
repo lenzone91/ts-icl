@@ -16,7 +16,7 @@ class FeedForward(nn.Module):
         mult: int = 4,
     ) -> None:
         """
-        A two-layer MLP with GeLU or Gated GeLU intermediate activation.
+        A two-layer MLP with GeLU intermediate activation.
 
         Args:
             dim (int): input and output dim

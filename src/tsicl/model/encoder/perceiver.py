@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from ..inr.freq_embedding import (
+from ..inr import (
     MultiScaleNeRFEncoding,
     NeRFEncoding,
 )

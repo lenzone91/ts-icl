@@ -1,4 +1,4 @@
-from typing import Any, Dict, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -75,11 +75,8 @@ class MultiScaleNeRFEncoding(nn.Module):
 
         return bands
 
-    def forward(self, coords, with_batch=True):
+    def forward(self, coords):
         encoded_list = []
-
-        # if self.include_input:
-        #     encoded_list.append(coords)
 
         # for scale, bands in self.bands.items():
         for band_name in self.band_names:
