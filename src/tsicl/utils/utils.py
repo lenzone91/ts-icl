@@ -106,9 +106,7 @@ def complete_nans(
         cov_with_replacement    = X_cov
 
     else:
-        
-        if is_test:
-            gen = torch.Generator().manual_seed(42) if is_test else None
+        gen = torch.Generator().manual_seed(42) if is_test else None
 
         # prepare tensors:
         has_batch_dim = X.ndim == 3

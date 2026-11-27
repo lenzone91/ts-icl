@@ -64,11 +64,11 @@ def validate_target_inputs(
 
     elif isinstance(inputs, np.ndarray):
         # convert to Tensor:
-        out = torch.Tensor(inputs)
+        out = torch.as_tensor(inputs, dtype=torch.float32)
     
     elif isinstance(inputs, pd.DataFrame):
         # convert to Tensor
-        out = torch.Tensor(inputs.values).unsqueeze(-1) # (b, t, 1)
+        out = torch.as_tensor(inputs.values, dtype=torch.float32).unsqueeze(-1) # (b, t, 1)
 
     else:
         if not isinstance(inputs, torch.Tensor):
@@ -164,9 +164,9 @@ def _list_dict_inputs_utils(
     # handle 'target':
     if isinstance(first_input[key], torch.Tensor) or isinstance(first_input[key], np.ndarray):
         if all([d[key].shape == list_inputs[0][key].shape for d in list_inputs]):
-            out = torch.stack([torch.Tensor(d[key]) for d in list_inputs]) # (bs, ...)
+            out = torch.stack([torch.as_tensor(d[key], dtype=torch.float32) for d in list_inputs]) # (bs, ...)
         else:
-            out = [torch.Tensor(d[key]) for d in list_inputs]
+            out = [torch.as_tensor(d[key], dtype=torch.float32) for d in list_inputs]
 
     # handle 'past_covariates' and 'future_covariates'
     else:       
@@ -185,7 +185,7 @@ def _list_dict_inputs_utils(
                 f"Expected all samples in `covars` dicts to have identical covariate keys."
             )
         
-        if not all([torch.Tensor(d[key][k]).squeeze().ndim == 1 for d in list_inputs for k in list_keys]):
+        if not all([torch.as_tensor(d[key][k], dtype=torch.float32).squeeze().ndim == 1 for d in list_inputs for k in list_keys]):
             raise ValueError(
                 "Expected covariates in a dict to be 1D Tensors."
             )
@@ -195,7 +195,7 @@ def _list_dict_inputs_utils(
             out = [
                 torch.stack(
                     [
-                        torch.Tensor(d[key][k]).squeeze() for k in list_keys
+                        torch.as_tensor(d[key][k], dtype=torch.float32).squeeze() for k in list_keys
                     ],
                     dim = 0 # (c t 1)
                 ).unsqueeze(-1) for d in list_inputs
@@ -236,7 +236,7 @@ def validate_covar_inputs(
         return True, None
     
     if isinstance(covars, np.ndarray):
-        covars = torch.Tensor(covars)
+        covars = torch.as_tensor(covars, dtype=torch.float32)
 
     if isinstance(covars, list):
 
