@@ -38,9 +38,7 @@ def prepare_context_tensors(
     has_covar = covariates is not None
 
     # get the total number of missing points in each sample:
-    nb_missing_points = torch.isnan(series_c).sum(1).squeeze() # (bs)
-    if nb_missing_points.ndim == 0:
-        nb_missing_points = nb_missing_points.unsqueeze(0)
+    nb_missing_points = torch.isnan(series_c).sum(1).squeeze(-1)
 
     min_missing = int(nb_missing_points.min().item())
     # compute the maximum context length:

@@ -185,20 +185,23 @@ def _list_dict_inputs_utils(
                 f"Expected all samples in `covars` dicts to have identical covariate keys."
             )
         
-        if not all([torch.as_tensor(d[key][k], dtype=torch.float32).squeeze().ndim == 1 for d in list_inputs for k in list_keys]):
-            raise ValueError(
-                "Expected covariates in a dict to be 1D Tensors."
-            )
-        
-        # for a given sample, concatenate all covariates in a single tensor;
+        for d in list_inputs:
+            for k in list_keys:
+                t = torch.as_tensor(d[key][k], dtype=torch.float32)
+                if not (t.ndim == 1 or (t.ndim == 2 and 1 in t.shape)):
+                    raise ValueError("Expected covariates in a dict to be 1D Tensors.")
+
+        # for a given sample, concatenate all covariates in a single tensor:
         try:
             out = [
                 torch.stack(
                     [
-                        torch.as_tensor(d[key][k], dtype=torch.float32).squeeze() for k in list_keys
+                        torch.as_tensor(d[key][k], dtype=torch.float32).reshape(-1)
+                        for k in list_keys
                     ],
-                    dim = 0 # (c t 1)
-                ).unsqueeze(-1) for d in list_inputs
+                    dim=0,  # (c, t)
+                ).unsqueeze(-1)  # (c, t, 1)
+                for d in list_inputs
             ]
         except Exception:
             raise ValueError(
