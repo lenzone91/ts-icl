@@ -1,9 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from ..utils import exists
-
 
 class PreNorm(nn.Module):
 
@@ -27,7 +23,7 @@ class PreNorm(nn.Module):
 
         self.fn = fn
         self.norm = nn.LayerNorm(dim, eps=1e-3)
-        self.norm_context = nn.LayerNorm(context_dim) if exists(context_dim) else None # type: ignore
+        self.norm_context = nn.LayerNorm(context_dim) if context_dim is not None else None # type: ignore
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
 
@@ -35,7 +31,7 @@ class PreNorm(nn.Module):
         x = self.norm(x)
 
         # normalize context if provided:
-        if exists(self.norm_context):
+        if self.norm_context is not None:
             context = kwargs["context"]
             normed_context = self.norm_context(context)
             kwargs.update(context=normed_context)
@@ -68,9 +64,9 @@ class PreNormCross(nn.Module):
 
         self.fn = fn
         self.norm = nn.LayerNorm(dim, eps=1e-3)
-        self.norm_k = nn.LayerNorm(k_dim) if exists(k_dim) else None # type: ignore
-        self.norm_v = nn.LayerNorm(v_dim) if exists(v_dim) else None # type: ignore
-        assert not ( exists(k_dim) ^ exists(v_dim) ) # not xor
+        self.norm_k = nn.LayerNorm(k_dim) if k_dim is not None else None # type: ignore
+        self.norm_v = nn.LayerNorm(v_dim) if v_dim is not None else None # type: ignore
+        assert not ( (k_dim is not None) ^ (v_dim is not None) ) # not xor
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
 
@@ -78,7 +74,7 @@ class PreNormCross(nn.Module):
         x = self.norm(x)
 
         # normalize keys and values:
-        if exists(self.norm_v):
+        if self.norm_v is not None:
             k = kwargs["k"]
             v = kwargs["v"]
             normed_k = self.norm_k(k)
@@ -88,10 +84,4 @@ class PreNormCross(nn.Module):
         # apply module over normalized inputs:
         return self.fn(x, **kwargs)
 
-
-class GEGLU(nn.Module):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gates = x.chunk(2, dim=-1)
-        return x * F.gelu(gates)
 

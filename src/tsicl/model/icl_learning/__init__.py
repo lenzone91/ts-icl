@@ -1,6 +1,5 @@
-from .icl_learning import ICLearning, ICLearningCrossAttn
+from .icl_learning import ICLearningCrossAttn
 
 __all__ = [
-    "ICLearning",
     "ICLearningCrossAttn"
 ]

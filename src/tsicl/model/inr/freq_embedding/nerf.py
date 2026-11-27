@@ -109,9 +109,6 @@ class MultiScaleNeRFEncoding(nn.Module):
             "Scales": self.scales,
         }
 
-
-
-
 class NeRFEncoding(nn.Module):
     """PyTorch implementation of regular positional embedding, as used in the original NeRF and Transformer papers."""
 
@@ -213,19 +210,3 @@ class NeRFEncoding(nn.Module):
             "Include Input": self.include_input,
         }
 
-
-if __name__ == "__main__":
-    multi_scale_nerf = MultiScaleNeRFEncoding(
-        num_freqs_per_scale = 8,
-        log_sampling        = True,
-        include_input       = False,
-        input_dim           = 2,
-        disjoint            = False
-    )
-    # print(multi_scale_nerf.bands["3"])
-    # print(multi_scale_nerf.bands["4"])
-    # print(multi_scale_nerf.bands["5"])
-    print(multi_scale_nerf.out_dim)
-    x = torch.Tensor([0.1, 0.2]).unsqueeze(0)
-    y = multi_scale_nerf(x)
-    print("y", y.shape)

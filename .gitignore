@@ -45,3 +45,7 @@ MANIFEST
 # Documentation
 docs/build
 docs/autoapi
+
+# Others
+test.py
+.vscode

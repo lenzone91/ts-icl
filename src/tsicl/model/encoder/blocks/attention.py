@@ -5,8 +5,6 @@ import torch
 import torch.nn as nn
 from torch import einsum
 
-from ..utils import default, exists
-from .utils import GEGLU
 
 
 class FeedForward(nn.Module):
@@ -16,7 +14,6 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         mult: int = 4,
-        use_geglu: bool = False
     ) -> None:
         """
         A two-layer MLP with GeLU or Gated GeLU intermediate activation.
@@ -24,22 +21,14 @@ class FeedForward(nn.Module):
         Args:
             dim (int): input and output dim
             mult (int): multiplicative factor for the hidden layer dim
-            use_geglu (bool): True if Gated GELU activation, False if GeLU act
         """
 
         super().__init__()
-        if use_geglu:
-            self.net = nn.Sequential(
-                nn.Linear(dim, dim * mult * 2),
-                GEGLU(),
-                nn.Linear(dim * mult, dim),
-            )
-        else:
-            self.net = nn.Sequential(
-                nn.Linear(dim, dim * mult),
-                nn.GELU(),
-                nn.Linear(dim * mult, dim),
-            )
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim * mult),
+            nn.GELU(),
+            nn.Linear(dim * mult, dim),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -56,7 +45,6 @@ class CrossAttention(nn.Module):
         heads: int = 8,
         dim_head: int = 64,
         dropout: float = 0.,
-        headwise_attn_output_gate: bool = False
     ) -> None:
         """
         Multi-head cross-attention with arbitrary q, k, v.
@@ -78,10 +66,9 @@ class CrossAttention(nn.Module):
         self.scale     = dim_head**-0.5
         self.heads     = heads
         self.inner_dim = inner_dim
-        self.gating    = headwise_attn_output_gate
 
         # input projectors:
-        to_q_out_dim = inner_dim + int(heads * self.gating)
+        to_q_out_dim = inner_dim
         self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
         self.to_k   = nn.Linear(key_dim, inner_dim, bias=False)
         self.to_v   = nn.Linear(value_dim, inner_dim, bias=False)
@@ -97,17 +84,13 @@ class CrossAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
 
         h = self.heads
 
         q = self.to_q(x)    # (bs, seq_len, d_model) with d_model = n_heads x dim_head
-        if self.gating:
-            q, gate_scores = torch.split(q, [self.inner_dim, self.heads], dim=-1)
-            gate_scores    = rearrange(gate_scores, 'b n h -> b n h 1')
 
-        # context = default(context, x)
+        # context = context if context is not None else x
         k = self.to_k(k)    # (bs, seq_len_kv, d_model)
         v = self.to_v(v)    # (bs, seq_len_kv, d_model)
 
@@ -118,7 +101,7 @@ class CrossAttention(nn.Module):
         sim = einsum("b i d, b j d -> b i j", q, k) * self.scale # (bs x n_heads, seq_len, seq_len_kv)
 
         # apply attention mask, if need be:
-        if exists(mask):
+        if mask is not None:
             mask = mask.bool()
             mask = rearrange(mask, "b ... -> b (...)")
             max_neg_value = -torch.finfo(sim.dtype).max
@@ -132,12 +115,7 @@ class CrossAttention(nn.Module):
             sim[half:] = self.attn_drop( sim[half:].softmax(dim=-1) ) # (bs x n_heads, seq_len, seq_len_kv)
 
         out = einsum("b i j, b j d -> b i d", sim, v)      # (bs x n_heads, num_bandwidth, seq_len, dim_head)
-        if self.gating:
-            out = rearrange(out, "(b h) n d -> b n h d", h=h)   # (bs, seq_len, n_heads, dim_head)
-            out = out * torch.sigmoid( gate_scores )            # (bs, seq_len, n_heads, dim_head)
-            out = rearrange(out, "b n h d -> b n (h d)")        # (bs, seq_len, d_model)
-        else:
-            out = rearrange(out, "(b h) n d -> b n (h d)", h=h) # (bs, seq_len, d_model)
+        out = rearrange(out, "(b h) n d -> b n (h d)", h=h) # (bs, seq_len, d_model)
 
         return self.resid_drop(self.to_out(out))    # (bs, seq_len, query_dim)
 
@@ -156,7 +134,6 @@ class MultiScaleAttention(nn.Module):
         heads: int = 8,
         dim_head: int = 64,
         dropout: float = 0.,
-        headwise_attn_output_gate: bool = False
     ) -> None:
         """
         Multi-head multi-scale (queries at different frequency bandwidths) self-attention,
@@ -179,13 +156,13 @@ class MultiScaleAttention(nn.Module):
         self.scale  = dim_head**-0.5
         self.heads  = heads
         self.inner_dim = inner_dim
-        self.gating    = headwise_attn_output_gate
 
         # input projectors:
-        to_q_out_dim = inner_dim + int(heads * self.gating)
+        to_q_out_dim = inner_dim
         self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
-        self.to_kv  = nn.Linear(default(context_dim, query_dim), inner_dim * 2, bias=False)
-        self.to_out = nn.Linear(inner_dim, default(out_dim, query_dim))
+        
+        self.to_kv  = nn.Linear(context_dim if context_dim is not None else query_dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, out_dim if out_dim is not None else query_dim)
 
         # attention and residual connection dropouts:
         self.attn_drop  = nn.Dropout(dropout, inplace=False)
@@ -196,19 +173,15 @@ class MultiScaleAttention(nn.Module):
         x: torch.Tensor,
         context: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         
         h = self.heads
 
         # get query:
         q = self.to_q(x)    # (bs, seq_len, num_bandwidth, d_model)
-        if self.gating:
-            q, gate_scores = torch.split(q, [self.inner_dim, self.heads], dim=-1)
-            gate_scores    = rearrange(gate_scores, 'b n s h -> b n s h 1')
 
         # get kv:
-        context = default(context, x)
+        context = context if context is not None else x
         k, v    = self.to_kv(context).chunk(2, dim=-1)                                  # (bs, seq_len_kv, d_model)
         k, v    = map(lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (k, v))    # (bs x n_heads, seq_len_kv, dim_head)
 
@@ -219,7 +192,7 @@ class MultiScaleAttention(nn.Module):
         sim = einsum("b s i d, b j d -> b s i j", q, k) * self.scale    # (bs x n_heads, num_bandwidth, seq_len, seq_len_kv)
 
         # optionally add attention mask:
-        if exists(mask):
+        if mask is not None:
             mask = mask.bool()
             mask = rearrange(mask, "b ... -> b (...)")
             max_neg_value = -torch.finfo(sim.dtype).max
@@ -234,12 +207,7 @@ class MultiScaleAttention(nn.Module):
 
         # end of attention product:
         out = einsum("b s i j, b j d -> b s i d", sim, v)      # (bs x n_heads, num_bandwidth, seq_len, dim_head)
-        if self.gating:
-            out = rearrange(out, "(b h) s n d -> b n s h d", h=h)   # (bs, seq_len, n_heads, dim_head)
-            out = out * torch.sigmoid( gate_scores )                # (bs, seq_len, n_heads, dim_head)
-            out = rearrange(out, "b n s h d -> b n s (h d)")        # (bs, seq_len, d_model)
-        else:
-            out = rearrange(out, "(b h) s n d -> b n s (h d)", h=h) # (bs, seq_len, num_bandwidth, d_model)
+        out = rearrange(out, "(b h) s n d -> b n s (h d)", h=h) # (bs, seq_len, num_bandwidth, d_model)
 
         return self.resid_drop(self.to_out(out)) # (bs, seq_len, num_bandwidth, dim_query)
 
@@ -255,7 +223,6 @@ class Attention(nn.Module):
         heads: int = 8,
         dim_head: int = 64,
         dropout: float = 0.,
-        headwise_attn_output_gate: bool = False
     ) -> None:
         """
         Multi-head self-attention or cross-attention if context is provided for KV tensors.
@@ -277,13 +244,12 @@ class Attention(nn.Module):
         self.scale     = dim_head**-0.5
         self.heads     = heads
         self.inner_dim = inner_dim
-        self.gating    = headwise_attn_output_gate
 
         # input projectors:
-        to_q_out_dim = inner_dim + int(heads * self.gating)
+        to_q_out_dim = inner_dim
         self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
-        self.to_kv  = nn.Linear(default(context_dim, query_dim), inner_dim * 2, bias=False)
-        self.to_out = nn.Linear(inner_dim, default(out_dim, query_dim))
+        self.to_kv  = nn.Linear(context_dim if context_dim is not None else query_dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, out_dim if out_dim is not None else query_dim)
 
         # attention and residual connection dropouts:
         self.attn_drop = nn.Dropout(dropout, inplace=False)
@@ -294,19 +260,15 @@ class Attention(nn.Module):
         x: torch.Tensor,
         context: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         
         h = self.heads
 
         # get query:
         q = self.to_q(x)    # (bs, seq_len, d_model)
-        if self.gating:
-            q, gate_scores = torch.split(q, [self.inner_dim, self.heads], dim=-1)
-            gate_scores    = rearrange(gate_scores, 'b n h -> b n h 1')
 
         # get k,v:
-        context = default(context, x)                   # (bs, seq_len_kv, d_kv)
+        context = context if context is not None else x                  # (bs, seq_len_kv, d_kv)
         k, v    = self.to_kv(context).chunk(2, dim=-1)  # (bs, seq_len_kv, d_model)
 
         # rearrange per head:
@@ -316,7 +278,7 @@ class Attention(nn.Module):
         sim = einsum("b i d, b j d -> b i j", q, k) * self.scale    # (bs x n_heads, seq_len, seq_len_kv)
 
         # optionally add attention mask:
-        if exists(mask):
+        if mask is not None:
             mask = mask.bool()
             mask = rearrange(mask, "b ... -> b (...)")
             max_neg_value = -torch.finfo(sim.dtype).max
@@ -331,11 +293,6 @@ class Attention(nn.Module):
 
         # end of attention product:
         out = einsum("b i j, b j d -> b i d", sim, v)      # (bs x n_heads, seq_len, dim_head)
-        if self.gating:
-            out = rearrange(out, "(b h) n d -> b n h d", h=h)   # (bs, seq_len, n_heads, dim_head)
-            out = out * torch.sigmoid( gate_scores )            # (bs, seq_len, n_heads, dim_head)
-            out = rearrange(out, "b n h d -> b n (h d)")        # (bs, seq_len, d_model)
-        else:
-            out = rearrange(out, "(b h) n d -> b n (h d)", h=h) # (bs, seq_len, d_model)
+        out = rearrange(out, "(b h) n d -> b n (h d)", h=h) # (bs, seq_len, d_model)
 
         return self.resid_drop(self.to_out(out))    # (bs, seq_len, dim_query)

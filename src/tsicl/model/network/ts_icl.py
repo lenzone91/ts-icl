@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from ..encoder import PerceiverEncoder, UnivariatePerceiverEncoder
-from ..icl_learning import ICLearning, ICLearningCrossAttn
+from ..encoder import PerceiverEncoder
+from ..icl_learning import ICLearningCrossAttn
 
 
 class TSICLNetwork(nn.Module):
@@ -13,19 +13,18 @@ class TSICLNetwork(nn.Module):
 
     def __init__(
         self,
-        encoder: PerceiverEncoder | UnivariatePerceiverEncoder,
-        head: ICLearning | ICLearningCrossAttn,
+        encoder: PerceiverEncoder,
+        head: ICLearningCrossAttn,
         apply_asinh_transform: bool = False,
-        *args,
-        **kwargs
+        *args, **kwargs
     ):        
         super().__init__()
 
         self.encoder = encoder
-        assert isinstance(self.encoder, PerceiverEncoder) or isinstance(self.encoder, UnivariatePerceiverEncoder)
+        assert isinstance(self.encoder, PerceiverEncoder)
 
         self.tf_icl = head
-        assert isinstance(self.tf_icl, ICLearning) or isinstance(self.tf_icl, ICLearningCrossAttn)
+        assert isinstance(self.tf_icl, ICLearningCrossAttn)
 
         self.to_tf_icl = nn.Linear(self.encoder.out_dim, self.tf_icl.d_model)
         self.apply_asinh_transform = apply_asinh_transform
@@ -61,8 +60,6 @@ class TSICLNetwork(nn.Module):
         series_covar: Optional[torch.Tensor] = None,
         coords_covar: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        return_stats: bool = False,
-        sample_posterior: bool = False,
         undo_asinh_transform: bool = True,
         return_latent_only: bool = False
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -82,8 +79,6 @@ class TSICLNetwork(nn.Module):
                 coords_covar       = coords_covar if coords_covar is not None else None,
                 mask               = mask,
                 target_coords      = target_coords,
-                return_stats       = return_stats,
-                sample_posterior   = sample_posterior,
                 return_latent_only = return_latent_only
             )
         
@@ -92,11 +87,8 @@ class TSICLNetwork(nn.Module):
             assert isinstance(latents, torch.Tensor)
             return latents # (bs, num_tokens, hidden_dim)
         
-        elif return_stats:
-            localized_latents, kl_loss, mean, logvar = out
-        
         else:
-            localized_latents, kl_loss = out
+            localized_latents = out
         # localized_latents -> (bs, seq_len, num_bandwidth, pos_embed_dim)
 
         # stack freq scales:
@@ -115,7 +107,4 @@ class TSICLNetwork(nn.Module):
         if undo_asinh_transform:
             out = self._prepare_outputs(out) # (bs, seq_len - context_len, 1)
 
-        if return_stats:
-            return out, kl_loss, mean, logvar
-
-        return out, kl_loss
+        return out
