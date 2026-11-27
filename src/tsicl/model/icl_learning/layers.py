@@ -22,11 +22,6 @@ class MultiheadAttention(nn.Module):
 
     dropout : float, default=0.0
         Dropout probability applied to attention weights
-
-    References
-    ----------
-    .. [1] Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding"
-           https://arxiv.org/abs/2104.09864
     """
 
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
@@ -46,7 +41,7 @@ class MultiheadAttention(nn.Module):
         nn.init.constant_(self.out_proj.bias, 0.0)
 
     def forward(self, x: Tensor, train_size: int) -> Tensor:
-        """Compute multi-head attention with support for rotary positional encoding.
+        """Compute multi-head attention.
 
         Parameters
         ----------
@@ -148,7 +143,7 @@ class MultiheadAttentionBlock(nn.Module):
         nn.init.zeros_(self.linear2.bias)
 
     def forward(self, x: Tensor, train_size: int) -> Tensor:
-        """Process input through attention with optional rotary positional encoding.
+        """Process input through attention.
 
         Parameters
         ----------
