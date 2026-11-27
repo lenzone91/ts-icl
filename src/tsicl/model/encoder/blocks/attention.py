@@ -45,7 +45,6 @@ class FeedForward(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
-
 class CrossAttention(nn.Module):
     """ An implementation of multi-head cross-attention with arbitrary q, k, v."""
 

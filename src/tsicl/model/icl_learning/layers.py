@@ -9,13 +9,8 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from .attention import multi_head_attention_forward
-
 class MultiheadAttention(nn.Module):
     """Enhanced multi-head attention.
-
-    This extends PyTorch's MultiheadAttention to support specialized attention masking
-    with `train_size` an integer.
 
     Parameters
     ----------
@@ -39,12 +34,13 @@ class MultiheadAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.dropout = dropout
+        assert embed_dim % num_heads == 0, f"embed_dim {embed_dim} not divisible by num_heads {num_heads}"
+        self.head_dim = embed_dim // num_heads
+
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
         self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim))
         self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self._reset_parameters()
 
-    def _reset_parameters(self):
         nn.init.xavier_uniform_(self.in_proj_weight)
         nn.init.constant_(self.in_proj_bias, 0.0)
         nn.init.constant_(self.out_proj.bias, 0.0)
@@ -68,18 +64,31 @@ class MultiheadAttention(nn.Module):
             Attention output of shape (..., tgt_len, embed_dim)
         """
 
-        return multi_head_attention_forward(
-            x,
-            self.num_heads,
-            self.in_proj_weight,
-            self.in_proj_bias,
-            self.dropout,
-            self.out_proj.weight,
-            self.out_proj.bias,
-            training=self.training,
-            train_size=train_size,
-        )
+        batch_size, seq_len, embed_dim = x.shape
 
+        # Projection conjointe Q, K, V : (B, T, E) -> 3 x (B, nh, T, hs)
+        q, k, v = F.linear(x, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        dropout_p = self.dropout if self.training else 0.0
+
+        # Le contexte ([:train_size]) s'observe lui-même
+        k_ctx = k[:, :, :train_size, :]
+        v_ctx = v[:, :, :train_size, :]
+        attn_ctx = F.scaled_dot_product_attention(q[:, :, :train_size, :], k_ctx, v_ctx, dropout_p=dropout_p)
+
+        # Les cibles ([train_size:]) observent uniquement le contexte
+        if train_size < seq_len:
+            attn_tgt = F.scaled_dot_product_attention(q[:, :, train_size:, :], k_ctx, v_ctx, dropout_p=dropout_p)
+            attn = torch.cat([attn_ctx, attn_tgt], dim=2)
+        else:
+            attn = attn_ctx
+
+        # Fusion des têtes + projection de sortie
+        attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+        return self.out_proj(attn)
 
 class MultiheadAttentionBlock(nn.Module):
     """Attention block supporting rotary positional encoding.
@@ -168,3 +177,79 @@ class MultiheadAttentionBlock(nn.Module):
     def _ff_block(self, x: Tensor) -> Tensor:
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         return self.dropout2(x)
+
+class Encoder(nn.Module):
+    """Stack of multihead attention blocks.
+
+    Parameters
+    ----------
+    num_blocks : int
+        Number of multihead attention blocks in the stack
+
+    d_model : int
+        Model dimension
+
+    nhead : int
+        Number of attention heads and should be a divisor of d_model
+
+    dim_feedforward : int
+        Dimension of the feedforward network in each block
+
+    dropout : float, default=0.0
+        Dropout probability
+
+    activation : str or unary callable, default="gelu"
+        The activation function used in the feedforward network, can be
+        either string ("relu" or "gelu") or unary callable
+    """
+
+    def __init__(
+        self,
+        num_blocks: int,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        dropout: float = 0.0,
+        activation: str | Callable[[Tensor], Tensor] = "gelu",
+    ):
+        super().__init__()
+
+        if d_model % nhead != 0:
+            raise ValueError(f"d_model ({d_model}) must be divisible by nhead ({nhead})")
+
+        self.blocks = nn.ModuleList(
+            [
+                MultiheadAttentionBlock(
+                    d_model         = d_model,
+                    nhead           = nhead,
+                    dim_feedforward = dim_feedforward,
+                    dropout         = dropout,
+                    activation      = activation,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
+    def forward(self, src: Tensor, train_size: int) -> Tensor:
+        """Process input through the stacked blocks.
+
+        Parameters
+        ----------
+        src : Tensor
+            Input tensor of shape (..., seq_len, d_model)
+
+        train_size : int
+            Creates a split attention pattern where:
+              - The first `train_size` tokens perform self-attention only (attend to themselves)
+              - The remaining tokens attend only to the first `train_size` tokens
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape (..., seq_len, d_model)
+        """
+        out = src
+        for block in self.blocks:
+            out = block(x=out, train_size=train_size)
+
+        return out

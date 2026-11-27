@@ -8,7 +8,7 @@ from torch import Tensor, nn
 
 from ..encoder.blocks.attention import CrossAttention, FeedForward
 from ..encoder.blocks.utils import PreNorm, PreNormCross
-from .encoders import Encoder
+from .layers import Encoder
 
 # ACKNOWLEDGEMENT: code adapted from TabICL implementation:
 # https://github.com/soda-inria/tabicl/tree/main
