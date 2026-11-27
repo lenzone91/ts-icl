@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from torch import Tensor
 from torch.nn import functional as F
@@ -20,8 +18,7 @@ def multi_head_attention_forward(
     train_size: int,
     training: bool = True,
 ) -> Tensor:
-    """Multi-head attention with support for rotary position embeddings
-    as well as specialized processing when attn_mask is an integer.
+    """Multi-head attention with support for specialized processing when train_size is an integer.
 
     Parameters
     ----------
@@ -77,7 +74,7 @@ def multi_head_attention_forward(
     if not training:
         dropout_p = 0.0
 
-    # Process left segment (self-attention within first cut_pos tokens)
+    # Process left segment (self-attention within first train_size tokens)
     k_ctx = k[:, :, :train_size, :]
     v_ctx = v[:, :, :train_size, :]
     attn_ctx = F.scaled_dot_product_attention(q[:, :, :train_size, :], k_ctx, v_ctx, dropout_p=dropout_p)

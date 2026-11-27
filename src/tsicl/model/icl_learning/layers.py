@@ -12,11 +12,10 @@ import torch.nn.functional as F
 from .attention import multi_head_attention_forward
 
 class MultiheadAttention(nn.Module):
-    """Enhanced multi-head attention with rotary positional embedding support.
+    """Enhanced multi-head attention.
 
-    This extends PyTorch's MultiheadAttention to support rotary position embeddings (RoPE)
-    and specialized attention masking when `train_size` is an integer. The implementation always
-    uses `batch_first=True`, meaning all input tensors have shape (..., seq_len, embed_dim).
+    This extends PyTorch's MultiheadAttention to support specialized attention masking
+    with `train_size` an integer.
 
     Parameters
     ----------
@@ -96,7 +95,7 @@ class MultiheadAttentionBlock(nn.Module):
     dim_feedforward : int
        Dimension of the feedforward network
 
-    dropout : float, default=0.0
+    dropout : float
         Dropout probability
 
     activation : str or unary callable, default="gelu"

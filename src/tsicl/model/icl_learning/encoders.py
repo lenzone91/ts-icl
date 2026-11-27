@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable
 
 from torch import Tensor, nn
 
@@ -79,7 +79,8 @@ class Encoder(nn.Module):
         Tensor
             Output tensor of shape (..., seq_len, d_model)
         """
+        out = src
         for block in self.blocks:
-            out = block(x=src, train_size=train_size)
+            out = block(x=out, train_size=train_size)
 
         return out
