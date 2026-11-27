@@ -8,7 +8,7 @@ from torch import einsum
 
 
 class FeedForward(nn.Module):
-    """ A two-layer MLP with GeLU or Gated GeLU intermediate activation."""
+    """ A two-layer MLP with GeLU intermediate activation."""
 
     def __init__(
         self,
@@ -68,8 +68,7 @@ class CrossAttention(nn.Module):
         self.inner_dim = inner_dim
 
         # input projectors:
-        to_q_out_dim = inner_dim
-        self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
+        self.to_q   = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k   = nn.Linear(key_dim, inner_dim, bias=False)
         self.to_v   = nn.Linear(value_dim, inner_dim, bias=False)
         self.to_out = nn.Linear(inner_dim, query_dim)
@@ -90,7 +89,6 @@ class CrossAttention(nn.Module):
 
         q = self.to_q(x)    # (bs, seq_len, d_model) with d_model = n_heads x dim_head
 
-        # context = context if context is not None else x
         k = self.to_k(k)    # (bs, seq_len_kv, d_model)
         v = self.to_v(v)    # (bs, seq_len_kv, d_model)
 
@@ -158,8 +156,7 @@ class MultiScaleAttention(nn.Module):
         self.inner_dim = inner_dim
 
         # input projectors:
-        to_q_out_dim = inner_dim
-        self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
+        self.to_q   = nn.Linear(query_dim, inner_dim, bias=False)
         
         self.to_kv  = nn.Linear(context_dim if context_dim is not None else query_dim, inner_dim * 2, bias=False)
         self.to_out = nn.Linear(inner_dim, out_dim if out_dim is not None else query_dim)
@@ -246,8 +243,7 @@ class Attention(nn.Module):
         self.inner_dim = inner_dim
 
         # input projectors:
-        to_q_out_dim = inner_dim
-        self.to_q   = nn.Linear(query_dim, to_q_out_dim, bias=False)
+        self.to_q   = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_kv  = nn.Linear(context_dim if context_dim is not None else query_dim, inner_dim * 2, bias=False)
         self.to_out = nn.Linear(inner_dim, out_dim if out_dim is not None else query_dim)
 

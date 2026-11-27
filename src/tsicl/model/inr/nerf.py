@@ -97,18 +97,6 @@ class MultiScaleNeRFEncoding(nn.Module):
 
         return torch.stack(encoded_list, dim=-2)
 
-    def name(self) -> str:
-        return "Multiscale Positional Encoding"
-
-    def public_properties(self) -> Dict[str, Any]:
-        return {
-            "Output Dim": self.out_dim,
-            "Num. Frequencies": self.num_freqs_per_scale * len(self.scales),
-            "Max Frequency": f"2^{self.max_freq_log2}",
-            "Include Input": self.include_input,
-            "Scales": self.scales,
-        }
-
 class NeRFEncoding(nn.Module):
     """PyTorch implementation of regular positional embedding, as used in the original NeRF and Transformer papers."""
 
@@ -193,20 +181,3 @@ class NeRFEncoding(nn.Module):
             if self.include_input:
                 encoded = torch.cat([coords, encoded], dim=-1)
         return encoded
-
-    def name(self) -> str:
-        """A human readable name for the given wisp module."""
-        return "Positional Encoding"
-
-    def public_properties(self) -> Dict[str, Any]:
-        """Wisp modules expose their public properties in a dictionary.
-        The purpose of this method is to give an easy table of outwards facing attributes,
-        for the purpose of logging, gui apps, etc.
-        """
-        return {
-            "Output Dim": self.out_dim,
-            "Num. Frequencies": self.num_freq,
-            "Max Frequency": f"2^{self.max_freq_log2}",
-            "Include Input": self.include_input,
-        }
-

@@ -42,8 +42,6 @@ class PerceiverEncoder(nn.Module):
         """
         Modified AROMA encoder based on a Perceiver architecture.
 
-        Output deep coordinate-based features for an INR decoder.
-
         Args:
             input_dim (int): number of coordinates
             num_channels (int): number of channels in values tensors
@@ -199,7 +197,6 @@ class PerceiverEncoder(nn.Module):
                     ], dim = 1
                 ).to(series.device),
                 mask_covar
-                # torch.ones(series_covar.shape[1], series_covar.shape[2])
             ], dim = 0).bool() # (C, seq_len)
             # XXX merge with existing `mask`?
 
@@ -221,7 +218,6 @@ class PerceiverEncoder(nn.Module):
                 torch.cat(
                     [
                         mask_covar,
-                        # torch.ones(series_covar.shape[1], series_covar.shape[2]),
                         torch.zeros(series_covar.shape[1], abs(missing_len)).to(series.device)
                     ], dim = 1
                 )
@@ -251,7 +247,7 @@ class PerceiverEncoder(nn.Module):
         mask: torch.Tensor | None = None,
         target_coords: torch.Tensor | None = None,
         return_latent_only: bool = False
-    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         
         '''
         series is shape (B, T_shared, 1)
@@ -319,7 +315,7 @@ class PerceiverEncoder(nn.Module):
 
         # L layers of self-attention on latent tokens:
         x = self.lift_z(self.mean_fc(x))
-        for self_attn, self_ff in list(self.layers_before_mixing):
+        for self_attn, self_ff in self.layers_before_mixing:
             x = self_attn(x) + x
             x = self_ff(x) + x
 
@@ -330,21 +326,16 @@ class PerceiverEncoder(nn.Module):
         # select target time series dimension:
         x_auto_reg = x[:, 0, :].unsqueeze(1)                            # (bs x num_latents, 1, hidden_dim)
 
-        # cross_attn, cross_ff = self.cross_attend_channels
-        for index, (cross_attn, cross_ff) in enumerate(self.cross_attend_channels): # pyright: ignore[reportGeneralTypeIssues]
+        for cross_attn, cross_ff in self.cross_attend_channels: # pyright: ignore[reportGeneralTypeIssues]
 
             # do cross-token attention:
             x_auto_reg = cross_attn(x_auto_reg, k=x, v=x, mask=None) + x_auto_reg    # (bs x num_latents, 1, hidden_dim)
             x_auto_reg = cross_ff(x_auto_reg) + x_auto_reg                           # (bs x num_latents, 1, hidden_dim)
             
-        # x = cross_attn(x_auto_reg, k=x, v=x, mask=None) + x_auto_reg    # (bs x num_latents, 1, hidden_dim)
-        # x = cross_ff(x) + x                                             # (bs x num_latents, 1, hidden_dim)
-
         # rearrange and self attention block:
-        # x = rearrange(x, '(b m) 1 d -> b m d', b=b, m=self.num_latents) # (bs, num_latents, hidden_dim)
         x = rearrange(x_auto_reg, '(b m) 1 d -> b m d', b=b, m=self.num_latents) # (bs, num_latents, hidden_dim)
 
-        for index, (self_attn, self_ff) in enumerate(self.layers_after_mixing): # pyright: ignore[reportGeneralTypeIssues]
+        for self_attn, self_ff in self.layers_after_mixing: # pyright: ignore[reportGeneralTypeIssues]
 
             # do self-attention
             x = self_attn(x) + x    # (bs, num_latents, hidden_dim)

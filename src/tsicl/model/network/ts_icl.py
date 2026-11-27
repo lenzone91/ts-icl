@@ -62,21 +62,18 @@ class TSICLNetwork(nn.Module):
         mask: Optional[torch.Tensor] = None,
         undo_asinh_transform: bool = True,
         return_latent_only: bool = False
-    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         
 
         # prepare inputs (asinh transform, etc.):
         series, series_covar = self._prepare_inputs(series, series_covar)
 
-        # get train len for TF_ICL:
-        train_size = series.shape[1]
-
         # encode:
         out = self.encoder(
                 series             = series,
                 coords             = coords,
-                series_covar       = series_covar if series_covar is not None else None,
-                coords_covar       = coords_covar if coords_covar is not None else None,
+                series_covar       = series_covar,
+                coords_covar       = coords_covar,
                 mask               = mask,
                 target_coords      = target_coords,
                 return_latent_only = return_latent_only

@@ -144,18 +144,9 @@ class TSICL:
 
         #temp
         if "encoder" in self.model_config:
-            if "include_pos_in_value" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["include_pos_in_value"]
-            if "use_kl" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["use_kl"]
-            if "headwise_attn_output_gate" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["headwise_attn_output_gate"]
-            if "decoder_ff" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["decoder_ff"]
-            if "encode_geo" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["encode_geo"]
-            if "bottleneck_index" in self.model_config["encoder"]:
-                del self.model_config["encoder"]["bottleneck_index"]
+            for k in ("include_pos_in_value", "use_kl", "headwise_attn_output_gate", "decoder_ff", "encode_geo", "bottleneck_index"):
+                if k in self.model_config["encoder"]:
+                    del self.model_config["encoder"][k]
 
         self.forecaster: TSICLNetwork = instantiate(self.model_config)
         self.imputer: TSICLNetwork = instantiate(self.model_config)
