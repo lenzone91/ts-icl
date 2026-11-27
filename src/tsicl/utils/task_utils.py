@@ -41,22 +41,23 @@ def prepare_context_tensors(
     nb_missing_points = torch.isnan(series_c).sum(1).squeeze() # (bs)
     if nb_missing_points.ndim == 0:
         nb_missing_points = nb_missing_points.unsqueeze(0)
-    
+
+    min_missing = int(nb_missing_points.min().item())
     # compute the maximum context length:
-    max_context_len   = int( series_c.shape[1] - min(nb_missing_points) )
+    max_context_len = int( series_c.shape[1] - min_missing)
     
     # prepare context tensors; handle each sample separately:
     list_coords_c, list_series_c, list_covar_c = [], [], []
     for idx in range(len(series_c)):
         
         # get sample:
-        sample = series_c[idx].squeeze()
+        sample = series_c[idx, :, 0]
 
         # get missing mask:
         is_missing_mask = torch.isnan(sample)   # (T,)
 
         # handle series that have too many nans (= more than the min nb of nan in the batch)
-        if is_missing_mask.sum() > min(nb_missing_points):
+        if is_missing_mask.sum() > min_missing:
 
             # get number of values actually observed:
             cur_len = len(sample[~is_missing_mask])
@@ -66,14 +67,14 @@ def prepare_context_tensors(
             # (nan values will be discared when we complete_nans)
             series_i = torch.cat([
                 sample[~is_missing_mask],
-                torch.nan * torch.ones(mis_len).to(sample.device)
+                torch.full((mis_len,), torch.nan, device=sample.device, dtype=sample.dtype)
             ]).unsqueeze(-1) # (max_context_len, 1)
 
             # (ii) same padding (with ones) for the grid:
             grid_i = torch.cat([
-                grid[idx][~is_missing_mask].squeeze(),
-                torch.ones(mis_len).to(sample.device) # (T, 1), (T, 1)
-            ]).unsqueeze(-1) # (max_context_len, 1)
+                grid[idx, :, 0][~is_missing_mask],
+                torch.ones(mis_len, device=grid.device, dtype=grid.dtype),
+            ]).unsqueeze(-1)  # (max_context_len, 1)
 
             # (iii) handle covariates (context part):
             if has_covar:
@@ -85,9 +86,9 @@ def prepare_context_tensors(
                 # + then we must pad with nans:
                 nb_covars = covariates.shape[1] # (bs C t 1)
                 covar_c = torch.cat([
-                    covariates[idx][...,~is_missing_mask,:], # (c t_obs 1)
-                    torch.nan * torch.ones((nb_covars, mis_len, 1)).to(sample.device)
-                ], dim = - 2) # (C, max_context_len, 1)
+                    covariates[idx][..., ~is_missing_mask, :],  # (C, t_obs, 1)
+                    torch.full((nb_covars, mis_len, 1), torch.nan, device=covariates.device, dtype=covariates.dtype),
+                ], dim=-2)  # (C, max_context_len, 1)
 
                 # now, each covar may also contain NaN (and they may not be aligned between themselves)
 
@@ -106,7 +107,7 @@ def prepare_context_tensors(
 
         list_coords_c.append(grid_i.reshape(-1,1))   # (max_context_len, 1)
         list_series_c.append(series_i.reshape(-1,1)) # (max_context_len, 1)
-        if covariates is not None:
+        if has_covar:
             list_covar_c.append(covar_c)             # (C, max_context_len, 1)
 
     coords_c = torch.stack(list_coords_c) # (bs, max_context_len, 1)

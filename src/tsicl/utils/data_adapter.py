@@ -36,8 +36,6 @@ def validate_target_inputs(
 
         # for fevbench
         if isinstance(inputs[0], dict):
-            # past_covars, future_covars = None, None
-            # self._future_cov_keys = []
             if 'target' not in inputs[0].keys():
                 raise ValueError(
                     f"Dict input should have a 'target' key, received keys {list(inputs[0].keys())} instead"
@@ -46,11 +44,11 @@ def validate_target_inputs(
             
         elif isinstance(inputs[0], np.ndarray):
             # convert to list of Tensors:
-            out = [torch.Tensor(x) for x in inputs]
+            out = [torch.as_tensor(x, dtype=torch.float32) for x in inputs]
         
         elif isinstance(inputs[0], pd.DataFrame):
             # convert to list of DataFrames:
-            out = [torch.Tensor(x.values) for x in inputs]
+            out = [torch.as_tensor(x.values, dtype=torch.float32) for x in inputs]
         
         else:
             out = inputs
@@ -85,7 +83,7 @@ def validate_target_inputs(
         # make sure the Tensor has shape (b, t, 1):
         # (b possibly includes the channel dim)
         out, num_var = _check_input_dim(out, has_batch_dim = True)      # (bs, t, 1)
-        num_batches  = len(out) // batch_size + (len(out) % batch_size > 0)
+        num_batches  = (len(out) + batch_size - 1) // batch_size
 
     # case 2: list of 1D tensors (irregular lengths):
     elif isinstance(out, list):
@@ -144,7 +142,7 @@ def _check_input_dim(
         x = rearrange(x, 'b t c -> (b c) t 1')
     
     # raise error if a sample contains only NaNs:
-    if ((~x.isnan()).sum(1) == 0).sum(0) > 0:
+    if x.isnan().all(dim=1).any():
         raise ValueError(
             f"Input tensor of shape {x.shape} contains at least one sample full of NaNs, stop here"
         )
@@ -171,10 +169,7 @@ def _list_dict_inputs_utils(
             out = [torch.Tensor(d[key]) for d in list_inputs]
 
     # handle 'past_covariates' and 'future_covariates'
-    else:
-        if not isinstance(first_input[key], dict):
-            raise ValueError("Expected a Dict of Dict")
-        
+    else:       
         list_keys = list(first_input[key].keys())
         
         if len(list_keys) == 0:
@@ -246,10 +241,10 @@ def validate_covar_inputs(
     if isinstance(covars, list):
 
         if isinstance(covars[0], np.ndarray):
-            covars = [torch.Tensor(x) for x in covars]
+            covars = [torch.as_tensor(x, dtype=torch.float32) for x in covars]
         
         elif isinstance(covars[0], pd.DataFrame):
-            covars = [torch.Tensor(x.values) for x in covars]
+            covars = [torch.as_tensor(x.values, dtype=torch.float32) for x in covars]
 
         elif isinstance(covars[0], dict):
 
@@ -266,7 +261,6 @@ def validate_covar_inputs(
                     future_covars, _future_cov_keys = _list_dict_inputs_utils(covars, key = 'future_covariates', _future_cov_keys = _future_cov_keys)
 
                 past_covars, _future_cov_keys = _list_dict_inputs_utils(covars, key = 'past_covariates', _future_cov_keys = _future_cov_keys)
-                # is_tensor = isinstance(past_covars, torch.Tensor)
                 
                 if isinstance(past_covars, torch.Tensor) and isinstance(future_covars, torch.Tensor):
                     if past_covars.shape[1] != future_covars.shape[1]:
@@ -318,8 +312,6 @@ def validate_covar_inputs(
             assert covars[0].shape[-1] == 1
             covars = [rearrange(x, 'c t 1 -> 1 c t 1') for x in covars] # [(1, c, t, 1), (1, c, t, 1), ...]
         is_cov_tensor = False
-        # assert isinstance(inputs, list)
-        # assert len(covars) == len(inputs)
 
     else:
         raise ValueError(

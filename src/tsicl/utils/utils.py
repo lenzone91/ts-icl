@@ -36,9 +36,8 @@ def batchify(
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     if isinstance(x, list):
-        batch_size = 1
-        for ii in range(len(x)):
-            yield x[ii].to(device)
+        for item in x:
+            yield item.to(device)
         
     elif isinstance(x, torch.Tensor):
 
@@ -60,25 +59,20 @@ def make_grid(
     grid_length: int,
     num_samples: int,
     end_point: float = 1.0,
-    start_point: float = 0.0
+    start_point: float = 0.0,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
-    """Create a grid of time coords in (0, 1)
+    """Create a grid of time coords in [start_point, end_point].
 
-    Args:
-        grid_length (int): number of timesteps
-        num_samples (int): number of samples
-        end_point (float): end point of the grid
-        start_point (float): start point of the grid
-    
-    Returns:
-        Grid as torch.Tensor of shape `(num_samples, grid_length, 1)`.
+    Returns
+    -------
+    torch.Tensor of shape `(num_samples, grid_length, 1)`.
     """
-    
-    grid = torch.linspace(start_point, end_point, grid_length).float().unsqueeze(0).repeat_interleave(repeats=num_samples, dim=0)
-    grid = grid.unsqueeze(-1) # [N, T, 1]
-
-    return grid
-
+    return (
+        torch.linspace(start_point, end_point, grid_length, dtype=torch.float32, device=device)
+        .view(1, -1, 1)
+        .repeat(num_samples, 1, 1)
+    )
 
 def complete_nans(
     X: torch.Tensor,
@@ -114,7 +108,7 @@ def complete_nans(
     else:
         
         if is_test:
-            torch.manual_seed(42)
+            gen = torch.Generator().manual_seed(42) if is_test else None
 
         # prepare tensors:
         has_batch_dim = X.ndim == 3
@@ -140,7 +134,7 @@ def complete_nans(
             
             # replace NaNs by any other observed value:
             if valid_indices.numel() > 0 and invalid_indices.numel() > 0:  
-                replacements = valid_indices[torch.randint(0, valid_indices.numel(), (invalid_indices.numel(),))]
+                replacements = valid_indices[torch.randint(0, valid_indices.numel(), (invalid_indices.numel(),), generator=gen)]
                 X_filled[i, invalid_indices]     = X[i, replacements, 0]
                 partial_grid[i, invalid_indices] = grid[i, replacements, 0]
                 if X_cov is not None:
