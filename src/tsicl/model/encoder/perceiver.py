@@ -2,9 +2,10 @@ from typing import Sequence, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from ..inr import (
+from .nerf import (
     MultiScaleNeRFEncoding,
     NeRFEncoding,
 )
@@ -177,62 +178,28 @@ class PerceiverEncoder(nn.Module):
         coords: torch.Tensor,
         series_covar: torch.Tensor,
         coords_covar: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-
-        b = series.shape[0]
         missing_len = series_covar.shape[2] - series.shape[1]
 
         # handle nans in covar:
-        mask_covar   = series_covar.isnan().sum(0).squeeze(-1) == 0 # (C-1, covar_seq_len)
-        series_covar = torch.nan_to_num(series_covar, nan = 0.0)
+        mask_covar = series_covar.isnan().sum(0).squeeze(-1) == 0  # (C-1, covar_seq_len)
+        series_covar = torch.nan_to_num(series_covar, nan=0.0)
 
-        if missing_len > 0:
-
-            mask = torch.cat([
-                torch.cat(
-                    [
-                        torch.ones(1, series.shape[1]),
-                        torch.zeros(1, missing_len)
-                    ], dim = 1
-                ).to(series.device),
-                mask_covar
-            ], dim = 0).bool() # (C, seq_len)
-            # XXX merge with existing `mask`?
-
-            series = torch.cat([
-                series,
-                torch.zeros((b, missing_len, 1)).to(series.device)
-            ], dim = 1) # (bs, seq_len, 1)
-
-            coords = torch.cat([
-                coords,
-                torch.zeros((b, missing_len, 1)).to(series.device)
-            ], dim = 1) # (bs, seq_len, 1)
-
-        
-        elif missing_len < 0:
-
-            mask = torch.cat([
-                torch.ones(1, series.shape[1]).to(series.device),
-                torch.cat(
-                    [
-                        mask_covar,
-                        torch.zeros(series_covar.shape[1], abs(missing_len)).to(series.device)
-                    ], dim = 1
-                )
-            ], dim = 0).bool().to(series.device) # (C, seq_len)
-            # XXX merge with existing `mask`?
-
-            series_covar = torch.cat([
-                series_covar,
-                torch.zeros((series.shape[0], coords_covar.shape[1], abs(missing_len), 1)).to(series.device)
-            ], dim = 2)
-            
-            coords_covar = torch.cat([
-                coords_covar,
-                torch.zeros((series.shape[0], coords_covar.shape[1], abs(missing_len), 1)).to(series.device)
-            ], dim = 2) # (bs, C-1, seq_len, 1)
+        if missing_len != 0:
+            mask_series = torch.ones(1, series.shape[1], device=series.device, dtype=torch.bool)
+            if missing_len > 0:
+                mask_series = F.pad(mask_series, (0, missing_len), value=False)
+                series = F.pad(series, (0, 0, 0, missing_len))
+                coords = F.pad(coords, (0, 0, 0, missing_len))
+            else:
+                pad_len = -missing_len
+                mask_covar = F.pad(mask_covar, (0, pad_len), value=False)
+                series_covar = F.pad(series_covar, (0, 0, 0, pad_len))
+                coords_covar = F.pad(coords_covar, (0, 0, 0, pad_len))
+            # TODO: overwrites any input `mask` (currently always None from pipeline); merge if passing a custom mask
+            assert mask is None, "Merging an existing mask with covariate padding is not implemented"
+            mask = torch.cat([mask_series, mask_covar], dim=0)  # (C, seq_len)
 
         assert series.shape[1] == series_covar.shape[2] == coords.shape[1] == coords_covar.shape[2]
 

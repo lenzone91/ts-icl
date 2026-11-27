@@ -151,7 +151,6 @@ class NeRFEncoding(nn.Module):
     def forward(
         self,
         coords: torch.Tensor,
-        with_batch: bool = True
     ) -> torch.Tensor:
         
         """Embeds the coordinates.
@@ -161,20 +160,11 @@ class NeRFEncoding(nn.Module):
             (torch.FloatTensor): Embeddings of shape [N, input_dim + out_dim] or [N, out_dim].
         """
         
-        if with_batch:
-            N = coords.shape[0]
-            winded = (coords[...,None, :] * self.bands[None,None,:,None]).reshape(
-                N, coords.shape[1], coords.shape[-1] * self.num_freq)
-            encoded = torch.cat([torch.sin(winded*2*torch.pi), torch.cos(winded*2*torch.pi)], dim=-1)
-            if self.include_input:
-                encoded = torch.cat([coords, encoded], dim=-1)
+        N = coords.shape[0]
+        winded = (coords[...,None, :] * self.bands[None,None,:,None]).reshape(
+            N, coords.shape[1], coords.shape[-1] * self.num_freq)
+        encoded = torch.cat([torch.sin(winded*2*torch.pi), torch.cos(winded*2*torch.pi)], dim=-1)
+        if self.include_input:
+            encoded = torch.cat([coords, encoded], dim=-1)
 
-        else:
-            N = coords.shape[0]
-            winded = (coords[:, None] * self.bands[None, :, None]).reshape(
-                N, coords.shape[1] * self.num_freq
-            )
-            encoded = torch.cat([torch.sin(winded*2*torch.pi), torch.cos(winded*2*torch.pi)], dim=-1)
-            if self.include_input:
-                encoded = torch.cat([coords, encoded], dim=-1)
         return encoded
